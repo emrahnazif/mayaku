@@ -85,8 +85,11 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
 
 def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
     """The ONNX graph in fp16 with fp32 inputs and outputs, for a strongly
-    typed build (TensorRT 11): ModelOpt AutoCast, calibrated on a flat gray
-    image so that every node converts. Written next to `src`."""
+    typed build (TensorRT 11): ModelOpt AutoCast on a flat gray image, with
+    `data_max` raised from AutoCast's 512 to fp16's max, so only a value fp16
+    cannot hold on that image keeps a node in fp32 -- every node converts, as
+    TensorRT 10's fp16 flag converts it (neither guards overflow on real
+    images). Written next to `src`."""
     try:
         from modelopt.onnx import autocast
     except ImportError as e:
@@ -97,7 +100,8 @@ def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
     gray = np.full((batch, 3, *canvas), 114 / 255, np.float32)
     out = src.with_suffix(".fp16.onnx")
     onnx.save(autocast.convert_to_mixed_precision(str(src), low_precision_type="fp16", keep_io_types=True,
-                                                  calibration_data={"images": gray}), str(out))
+                                                  calibration_data={"images": gray},
+                                                  data_max=float(np.finfo(np.float16).max)), str(out))
     return out
 
 
