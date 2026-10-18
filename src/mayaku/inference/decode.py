@@ -89,17 +89,18 @@ def postprocess(preds, nc, reg_max, d=DEPLOY):
     floor = math.log(d.conf / (1 - d.conf))
     out, idxs = [], []
     for logits, bx in zip(cls, boxes, strict=True):
-        anchor = torch.arange(len(bx), device=bx.device)
+        # the survivors' indices once: each boolean-mask index syncs the host
         if d.multi_label:
-            i, lab = (logits > floor).nonzero(as_tuple=True)
-            box, score, anchor = bx[i], logits[i, lab].sigmoid(), anchor[i]
+            anchor, lab = (logits > floor).nonzero(as_tuple=True)
+            score = logits[anchor, lab].sigmoid()
         else:
             best, lab = logits.max(1)
-            m = best > floor
-            box, score, lab, anchor = bx[m], best[m].sigmoid(), lab[m], anchor[m]
+            anchor = (best > floor).nonzero().squeeze(1)
+            score, lab = best[anchor].sigmoid(), lab[anchor]
         if len(score) > d.topk:
             keep = score.topk(d.topk).indices
-            box, score, lab, anchor = box[keep], score[keep], lab[keep], anchor[keep]
+            score, lab, anchor = score[keep], lab[keep], anchor[keep]
+        box = bx[anchor]
         keep = batched_nms(box, score, lab, d.iou)[:d.max_det]
         out.append(torch.cat((box[keep], score[keep, None], lab[keep, None].float()), 1))
         idxs.append(anchor[keep])
