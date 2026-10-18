@@ -134,10 +134,30 @@ class Session:
         for n, t in self._out.items():
             self._ctx.set_tensor_address(n, t.data_ptr())
         self.outputs = outputs
+        self._graph: torch.cuda.CUDAGraph | None = None
 
     def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
-        # no sync: work on the maps is ordered after the engine on this stream
+        # no sync after the first call: work on the maps is ordered after the
+        # engine on this stream
         self._pixels.copy_(x)
+        if self._graph is None:
+            self._graph = self._capture()
+        else:
+            self._graph.replay()
+        return [self._out[n] for n in self.outputs]
+
+    def _run(self) -> None:
         torch.div(self._pixels, 255, out=self._input)
         self._ctx.execute_async_v3(torch.cuda.current_stream(self._device).cuda_stream)
-        return [self._out[n] for n in self.outputs]
+
+    def _capture(self) -> torch.cuda.CUDAGraph:
+        """Run once (TensorRT's lazy setup cannot be captured), then record the
+        scaling and the engine as one CUDA graph that later calls replay: one
+        launch instead of one per layer, which at small sizes is what bounds
+        the latency."""
+        self._run()
+        torch.cuda.current_stream(self._device).synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.device(self._device), torch.cuda.graph(graph):
+            self._run()
+        return graph

@@ -15,7 +15,7 @@ from mayaku.config import InputConfig, KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.batch import batch_to
 from mayaku.inference import ArtifactPredictor, Predictor, from_pretrained
 from mayaku.inference.decode import decode_sidecar
-from mayaku.inference.export import TARGETS, export
+from mayaku.inference.export import TARGETS, export, open_session
 from mayaku.inference.export.metadata import embed_sidecar, read_sidecar, strip_tensorrt_header
 from mayaku.inference.preprocess import letterbox_batch
 from mayaku.model.quant import qdq_export
@@ -162,6 +162,15 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
         want = predictor.batch(run[2])
     got = a.batch(run[2])
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
+    if target == "tensorrt":    # the first call records a CUDA graph, later calls replay it
+        s = open_session(path, a.sidecar, "cuda")
+        px = torch.randint(0, 256, (2, 1, 3, *a.canvas), dtype=torch.uint8,
+                           generator=torch.Generator().manual_seed(0))
+        first = [m.clone() for m in s(px[0])]
+        other = [m.clone() for m in s(px[1])]
+        again = s(px[0])
+        assert all(torch.equal(f, g) for f, g in zip(first, again, strict=True))
+        assert not all(torch.equal(f, o) for f, o in zip(first, other, strict=True))
 
 
 def test_export_refuses_what_a_target_or_model_cannot_do(predictor, tmp_path) -> None:
