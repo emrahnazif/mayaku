@@ -60,9 +60,18 @@ class Head(Fusible):
         `objects / nc` of them to be positive, so that ratio is the bias.
         RetinaNet's fixed 0.01 prior is the same idea without the per-level
         density term.
+
+        The prior only holds if the weights leave it alone, so they start
+        small (RetinaNet's std 0.01), not at the default init. A classifier
+        re-initialised on a pretrained tower, as every fine-tune to a new
+        class set does, reads features ~7x larger than a fresh tower's: the
+        default init spread its logits by 2-4 around the prior, 1-4% of cells
+        started above 0.5, and the class loss sat near 30 through warmup,
+        whose weight LR starts at zero.
         """
         h, w = canvas
         for cls, box, s in zip(self.cls, self.box, STRIDES, strict=True):
+            nn.init.normal_(cls.weight, std=0.01)
             nn.init.constant_(cls.bias, math.log(objects / nc / ((h / s) * (w / s))))
             nn.init.constant_(box.bias, 1.0)
 

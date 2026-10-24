@@ -20,6 +20,7 @@ from mayaku.model import mask as masklib
 from mayaku.model.box import decode_head, iou_xyxy
 
 STEPS = 260
+ATSS_STEPS = 420
 STEPS_PER_EPOCH = 20
 SIZE = 256
 NC = 4
@@ -90,10 +91,13 @@ def test_detection_overfits(cls_loss) -> None:
     assert parts["starved"] == 0, "an object was starved in a three-object scene"
 
 
-@pytest.mark.parametrize("warmup", [0, STEPS], ids=["TAL-only", "ATSS-only"])
-def test_either_assigner_alone_learns(warmup) -> None:
-    """The ATSS-to-TAL warmup must not be what makes training work."""
-    assert min(best_ious(overfit(warmup=warmup)[2])) > 0.70
+@pytest.mark.parametrize("warmup, steps", [(0, STEPS), (ATSS_STEPS, ATSS_STEPS)],
+                         ids=["TAL-only", "ATSS-only"])
+def test_either_assigner_alone_learns(warmup, steps) -> None:
+    """The ATSS-to-TAL warmup must not be what makes training work. ATSS
+    alone gets more steps: a class that starts at its prior climbs slower
+    under it than under TAL."""
+    assert min(best_ious(overfit(warmup=warmup, steps=steps)[2])) > 0.70
 
 
 def test_mask_branch_learns() -> None:
