@@ -67,3 +67,9 @@ images/
 # Training and experiment logs are deliberately NOT ignored — they are the
 # record of what was run.
 /*.png
+/benchmarks/rf100vl
+/benchmarks/rf100vl_curve
+/logs
+/nano
+/benchmarks
+/tools
