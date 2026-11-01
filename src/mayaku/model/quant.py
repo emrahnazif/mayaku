@@ -79,12 +79,20 @@ class ActFakeQuant(nn.Module):
         self._n = 0
         self._seen = None
 
+    @property
+    def observed(self):
+        return self._inited
+
+    def mark_observed(self):
+        """Treat the range buffers as an observed range, continued from here."""
+        self._inited, self._n = True, 1
+
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys,
                               unexpected_keys, error_msgs):
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
                                       unexpected_keys, error_msgs)
         if prefix + "mn" in state_dict:
-            self._inited, self._n = True, 1
+            self.mark_observed()
         elif self.optional:
             # an observer newer than the checkpoint: it stays unobserved (and
             # passes values through) until training or calibration sees data
@@ -102,7 +110,7 @@ class ActFakeQuant(nn.Module):
             if not self._inited:
                 self.mn.copy_(cmn)
                 self.mx.copy_(cmx)
-                self._inited, self._n = True, 1
+                self.mark_observed()
             elif self.momentum is None:
                 self._n += 1
                 self.mn.add_((cmn - self.mn) / self._n)
@@ -294,14 +302,14 @@ def _device(model):
     return p.device if p is not None else "cpu"
 
 
-def _observers(model):
+def observers(model):
     return [m for m in model.modules() if isinstance(m, ActFakeQuant)]
 
 
 def activation_scheme(model):
     """"symmetric" or "affine": how a quantization-aware model's activations
     quantize; None for a float model."""
-    obs = [m.symmetric for m in _observers(model)]
+    obs = [m.symmetric for m in observers(model)]
     if not obs:
         return None
     return "symmetric" if all(obs) else "affine"
@@ -372,7 +380,7 @@ def ranges_frozen(model):
     """No activation observer in `model` updates its range inside the block,
     even in train mode, so a pass that exists for another reason (BatchNorm
     recalibration) does not move the int8 ranges."""
-    obs = _observers(model)
+    obs = observers(model)
     saved = [m.observe for m in obs]
     for m in obs:
         m.observe = False
@@ -395,7 +403,7 @@ def recalibrate_ranges(model, batches):
     activations that evaluation and export will see. Recalibrate BatchNorm
     first. A model without QAT is untouched and `batches` is not read.
     """
-    obs = _observers(model)
+    obs = observers(model)
     if not obs:
         return
     was_training = model.training

@@ -45,7 +45,7 @@ from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size,
 from mayaku.engine.evaluation import STATS, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
-from mayaku.model.quant import fake_quant_disabled, is_qat, ranges_frozen
+from mayaku.model.quant import fake_quant_disabled, is_qat, observers, ranges_frozen
 from mayaku.utils.checkpoint import SIDECAR_KEY, check_sidecar, save_checkpoint
 
 STATE = "state.pt"   # the resumable training state `train` writes to `out`
@@ -233,6 +233,8 @@ class EMA:
     The tensor lists are paired once and updated with foreach kernels, and
     hold references to the live tensors, so an optimizer that replaced
     parameters rather than updating them in place would go unnoticed. None do.
+    The int8 ranges are buffers too; whether one has been observed is not,
+    so that is copied alongside them.
     """
 
     def __init__(self, model, decay=0.9999, tau=2000.0):
@@ -249,6 +251,7 @@ class EMA:
         buffers = [k for k in shadow if k not in param_set]
         self.shadow_buffers = [shadow[k] for k in buffers]
         self.live_buffers = [live[k] for k in buffers]
+        self.observers = list(zip(observers(self.model), observers(model), strict=True))
 
     @torch.no_grad()
     def update(self):
@@ -257,6 +260,11 @@ class EMA:
         torch._foreach_mul_(self.shadow, d)
         torch._foreach_add_(self.shadow, self.live, alpha=1 - d)
         torch._foreach_copy_(self.shadow_buffers, self.live_buffers)
+        for s, live in self.observers:
+            if live.observed and not s.observed:
+                s.mark_observed()
+            elif s.observed and not live.observed:
+                s.reset()
 
 
 def hms(seconds):

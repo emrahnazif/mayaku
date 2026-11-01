@@ -83,3 +83,17 @@ def test_tiny_run_learns(tmp_path, qat) -> None:
     assert (tmp_path / "run" / "best.pt").exists()
     # the int8 check is logged with QAT and only then
     assert ("int8_gap" in records[-1]) == qat
+
+
+def test_ema_int8_ranges_count_as_observed_with_the_live_ones() -> None:
+    """The EMA copies the live range buffers; it must also take over whether
+    they were observed, or its first int8 forward would re-observe them."""
+    from mayaku.engine.trainer import EMA
+    from mayaku.model.quant import observers
+
+    model = enable_qat(Detector(TINY, 2, 64))
+    ema = EMA(model)
+    model.train()(torch.rand(2, 3, 64, 64))
+    assert all(o.observed for o in observers(model))
+    ema.update()
+    assert all(o.observed for o in observers(ema.model))
