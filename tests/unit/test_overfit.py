@@ -18,6 +18,7 @@ from mayaku.engine.loss import DetectionLoss
 from mayaku.model import TINY, Detector, enable_qat, split_outputs
 from mayaku.model import mask as masklib
 from mayaku.model.box import decode_head, iou_xyxy
+from mayaku.model.quant import ranges_frozen
 
 STEPS = 260
 ATSS_STEPS = 420
@@ -52,7 +53,18 @@ def scene(seg=False):
 def overfit(tier=TINY, cls_loss="bce", warmup=3, qat=True, targets=None, steps=STEPS):
     """Train `steps` AdamW steps on the scene; returns (first total loss,
     first parts), (last total loss, last parts) and the trained model's
-    outputs on the scene."""
+    outputs on the scene. On one CPU thread, so a run is the same run every
+    time: threaded reductions sum in a varying order, and the drift across
+    a few hundred steps decides a borderline assertion."""
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        return _overfit(tier, cls_loss, warmup, qat, targets, steps)
+    finally:
+        torch.set_num_threads(threads)
+
+
+def _overfit(tier, cls_loss, warmup, qat, targets, steps):
     torch.manual_seed(0)
     model = Detector(tier, NC)
     if qat:
@@ -69,8 +81,11 @@ def overfit(tier=TINY, cls_loss="bce", warmup=3, qat=True, targets=None, steps=S
         opt.step()
         if step == 0:
             first = total.item(), {k: float(v) for k, v in parts.items()}
-    model.eval()
-    with torch.no_grad():
+    # scored with the batch statistics it trained on (the int8 ranges left
+    # as trained): a network fitted to one image is so sensitive that eval
+    # mode's running statistics move its logits by tens, and what is under
+    # test is each branch's learning, not BatchNorm
+    with ranges_frozen(model), torch.no_grad():
         preds = model(x)
     return first, (total.item(), parts), preds
 
