@@ -31,9 +31,11 @@ from mayaku.data.geometry import (
     fit,
     flip_boxes,
     flip_kpts,
+    keep,
     letterbox,
     place,
     scale_shift_kpts,
+    unlabel_outside,
     warp_boxes,
     warp_kpts,
 )
@@ -127,11 +129,25 @@ class CocoDetection(Dataset):
             nh, nw = img.shape[:2]
             (xa, xb, ya, yb), (sx, sy) = mosaic_tile(k, centre, (nw, nh), self.canvas)
             canvas[ya:yb, xa:xb] = img[sy:sy + (yb - ya), sx:sx + (xb - xa)]
-            parts.append(self.labels_at(j, r, (xa - sx, ya - sy)))
+            parts.append(self._tile_labels(j, r, (xa - sx, ya - sy), (xa, ya, xb, yb)))
         boxes, polys, kps = zip(*parts, strict=True)
         return (canvas, np.concatenate(boxes),
                 functools.reduce(Polys.cat, polys) if self.masks else None,
                 np.concatenate(kps) if self.kpt else None)
+
+    def _tile_labels(self, j, r, offset, tile):
+        """Image j's labels where its tile shows it: boxes and polygons
+        clipped to the visible tile (x1, y1, x2, y2), a box dropped by the
+        same rule as a crop (`keep`) when little of it is left, and keypoints
+        outside the tile unlabelled. Without the clip a box cut by the
+        mosaic's outer edge reaches past it into what becomes padding."""
+        boxes, polys, kp = self.labels_at(j, r, offset)
+        x1, y1, x2, y2 = tile
+        clipped = np.clip(boxes[:, 1:5], (x1, y1, x1, y1), (x2, y2, x2, y2))
+        ok = keep(boxes[:, 1:5], clipped)
+        boxes[:, 1:5] = clipped
+        return (boxes[ok], polys.select(ok).clip(tile) if self.masks else None,
+                unlabel_outside(kp, self.kpt, tile)[ok] if self.kpt else None)
 
     def _single(self, i):
         """One image letterboxed, skipping unreadable files, with its labels."""

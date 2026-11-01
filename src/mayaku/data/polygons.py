@@ -94,6 +94,21 @@ def outline(idx, part_off):
     return (v + move).astype(np.float32)
 
 
+def _clip_ring(p, axis, bound, greater):
+    """One Sutherland-Hodgman pass: the closed ring `p` (n, 2) cut by the
+    line `axis` = `bound`, keeping the side above it (`greater`) or below.
+    Each vertex inside is kept, and each edge that crosses the line adds
+    its crossing point, in ring order."""
+    v = p[:, axis]
+    inside = v >= bound if greater else v <= bound
+    q = np.roll(p, -1, 0)
+    cross = inside != np.roll(inside, -1)
+    t = (bound - v) / np.where(cross, q[:, axis] - v, 1.0)
+    hit = p + t[:, None] * (q - p)
+    hit[:, axis] = bound
+    return np.stack((p, hit), 1).reshape(-1, 2)[np.stack((inside, cross), 1).reshape(-1)]
+
+
 class Polys:
     """Instance polygons for one sample.
 
@@ -156,6 +171,33 @@ class Polys:
         part_off = np.concatenate(([0], np.cumsum(n_pts[keep_part]))).astype(np.int32)
         inst_off = np.concatenate(([0], np.cumsum(n_parts[keep]))).astype(np.int32)
         return Polys(xy, part_off, inst_off, self.has[keep])
+
+    def clip(self, rect):
+        """A new Polys clipped to the rectangle (x1, y1, x2, y2), each part
+        that crosses it by Sutherland-Hodgman (the rectangle is convex); a
+        part left with under three points is dropped, and an instance left
+        with none carries no mask."""
+        if not len(self.xy):
+            return self
+        x1, y1, x2, y2 = rect
+        starts = self.part_off[:-1]
+        lo, hi = np.minimum.reduceat(self.xy, starts), np.maximum.reduceat(self.xy, starts)
+        cut = ((lo < (x1, y1)) | (hi > (x2, y2))).any(1)
+        if not cut.any():
+            return self
+        parts = np.split(self.xy, self.part_off[1:-1])
+        for p in np.flatnonzero(cut):
+            for axis, bound, greater in ((0, x1, True), (0, x2, False), (1, y1, True), (1, y2, False)):
+                if len(parts[p]) >= 3:
+                    parts[p] = _clip_ring(parts[p], axis, bound, greater)
+        alive = np.array([len(q) >= 3 for q in parts])
+        part_inst = np.repeat(np.arange(len(self)), np.diff(self.inst_off))
+        n_parts = np.bincount(part_inst[alive], minlength=len(self))
+        kept = [q for q, a in zip(parts, alive, strict=True) if a]
+        return Polys(np.concatenate(kept).astype(np.float32) if kept else np.zeros((0, 2), np.float32),
+                     np.concatenate(([0], np.cumsum([len(q) for q in kept]))).astype(np.int32),
+                     np.concatenate(([0], np.cumsum(n_parts))).astype(np.int32),
+                     self.has & (n_parts > 0))
 
     def cat(self, other):
         return Polys(np.concatenate((self.xy, other.xy)),

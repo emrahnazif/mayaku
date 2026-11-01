@@ -135,16 +135,23 @@ def scale_shift_kpts(kp, k, r, offset):
     return kp.reshape(-1, 3 * k)
 
 
+def unlabel_outside(kp, k, rect):
+    """(n, 3K) keypoints with every point outside the half-open rectangle
+    [x1, x2) x [y1, y2) unlabelled (v = 0), in place."""
+    x1, y1, x2, y2 = rect
+    p = kp.reshape(-1, k, 3)
+    out = (p[..., 0] < x1) | (p[..., 0] >= x2) | (p[..., 1] < y1) | (p[..., 1] >= y2)
+    p[..., 2] = np.where(out, 0.0, p[..., 2])
+    return kp
+
+
 def warp_kpts(kp, k, m, canvas):
     """(n, 3K) keypoints under the affine `m`; points that leave the (H, W)
     canvas become unlabelled (v = 0)."""
     ch, cw = canvas
     kp = kp.reshape(-1, k, 3).copy()
-    xy = apply_affine(kp[:, :, :2], m)
-    out = (xy[..., 0] < 0) | (xy[..., 0] >= cw) | (xy[..., 1] < 0) | (xy[..., 1] >= ch)
-    kp[:, :, :2] = xy
-    kp[:, :, 2] = np.where(out, 0.0, kp[:, :, 2])
-    return kp.reshape(-1, 3 * k)
+    kp[:, :, :2] = apply_affine(kp[:, :, :2], m)
+    return unlabel_outside(kp.reshape(-1, 3 * k), k, (0, 0, cw, ch))
 
 
 def flip_kpts(kp, k, w, pairs):

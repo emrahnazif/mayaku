@@ -190,3 +190,11 @@ def test_unreadable_images_are_skipped_in_training(tmp_path) -> None:
     (tmp_path / "000.jpg").write_bytes(b"not a jpeg")
     for i in range(12):
         assert ds[i % len(ds)]["img"].shape == (3, 160, 160)
+
+
+def test_polygons_clip_to_a_rectangle() -> None:
+    p = Polys.from_coco([[[0, 0, 100, 0, 100, 100, 0, 100]], [[10, 10, 20, 10, 20, 20]]])
+    c = p.clip((50, -10, 200, 200))
+    assert sorted(map(tuple, c.parts(0)[0].tolist())) == [(50, 0), (50, 100), (100, 0), (100, 100)]
+    assert c.parts(1) == [] and list(c.has) == [True, False]
+    assert p.clip((-1, -1, 200, 200)) is p           # nothing outside: unchanged
