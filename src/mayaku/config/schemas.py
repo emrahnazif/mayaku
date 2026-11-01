@@ -78,8 +78,12 @@ class ModelConfig(_BaseModel):
     `obb` predicts oriented boxes (`mayaku.model.obb`), from each object's
     polygon in the annotations (its minimum-area rectangle); not combined
     with `seg` or `keypoints`.
+    `task` "classify" builds an image classifier on the tier's backbone
+    (`mayaku.model.classify`), trained from class folders; the detection
+    heads' settings do not apply to it.
     """
 
+    task: Literal["detect", "classify"] = "detect"
     tier: TierName = "n"
     num_classes: Annotated[int, Field(gt=0)] | None = None
     seg: bool = False
@@ -102,7 +106,7 @@ class ModelConfig(_BaseModel):
         and how it was trained (`qat`) -- starts from the defaults, so a base
         pretrained in float still fine-tunes int8-aware."""
         kp = self.keypoints
-        return ModelConfig(tier=self.tier, seg=self.seg, aux_arm=self.aux_arm,
+        return ModelConfig(task=self.task, tier=self.tier, seg=self.seg, aux_arm=self.aux_arm,
                            mask_stride=self.mask_stride, obb=self.obb,
                            keypoints=KeypointConfig(num=kp.num) if kp else None)
 
@@ -120,7 +124,14 @@ class ModelConfig(_BaseModel):
         nc = num_classes if num_classes is not None else self.num_classes
         if nc is None:
             raise ValueError("model.num_classes is unset; pass num_classes")
-        model = Detector(self.to_tier(), nc, canvas)
+        if self.task == "classify":
+            from mayaku.model.classify import Classifier
+
+            assert not (self.seg or self.keypoints or self.obb), \
+                "a classifier has no detection heads"
+            model = Classifier(self.to_tier(), nc, canvas)
+        else:
+            model = Detector(self.to_tier(), nc, canvas)
         return enable_qat(model, self.qat_activations == "symmetric") if self.qat else model
 
 

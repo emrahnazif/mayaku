@@ -28,6 +28,7 @@ from mayaku.api import evaluate, train
 from mayaku.config import parse_assignments
 from mayaku.engine.evaluation import rle
 from mayaku.inference import Detections, Predictor, from_pretrained
+from mayaku.inference.decode import Classification
 from mayaku.inference.export import TARGETS
 from mayaku.model import obb
 from mayaku.utils.download import (
@@ -54,9 +55,11 @@ def _train(
         help="YAML config. Optional with --weights, which then defines the architecture."),
     weights: str | None = typer.Option(
         None, "--weights", help="Checkpoint or hosted model name to warm-start from."),
-    annotations: Path = typer.Option(
-        ..., "--annotations", exists=True, dir_okay=False, help="Train COCO annotation JSON."),
-    images: Path = typer.Option(..., "--images", exists=True, file_okay=False, help="Train image directory."),
+    annotations: Path | None = typer.Option(
+        None, "--annotations", exists=True, dir_okay=False,
+        help="Train COCO annotation JSON (a classifier takes none: its --images are class folders)."),
+    images: Path = typer.Option(..., "--images", exists=True, file_okay=False,
+                                help="Train image directory, or a classifier's class folders."),
     val_annotations: Path | None = typer.Option(
         None, "--val-annotations", exists=True, dir_okay=False,
         help="Validation COCO JSON; enables per-epoch evaluation."),
@@ -75,7 +78,8 @@ def _train(
         None, "--resume", exists=True,
         help="Continue a run from its state.pt (or its train/ directory)."),
 ) -> None:
-    """Train a detector; the command-line form of `mayaku.train`."""
+    """Train a detector, or a classifier with --set model.task=classify; the
+    command-line form of `mayaku.train`."""
     try:
         overrides = parse_assignments(assignments)
     except ValueError as exc:
@@ -96,7 +100,9 @@ def _train(
 @app.command("eval")
 def _eval(
     weights: str = typer.Argument(..., help=_WEIGHTS_HELP),
-    annotations: Path = typer.Option(..., "--annotations", exists=True, dir_okay=False, help="COCO annotation JSON."),
+    annotations: Path | None = typer.Option(
+        None, "--annotations", exists=True, dir_okay=False,
+        help="COCO annotation JSON (none for a classifier, scored on class folders)."),
     images: Path = typer.Option(..., "--images", exists=True, file_okay=False, help="Image directory."),
     output: Path | None = typer.Option(
         None, "--output", file_okay=False, help="Directory to write metrics.json to."),
@@ -117,10 +123,16 @@ def _predict(
     output: Path | None = typer.Option(None, "--output", help="Write the JSON here."),
     device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
 ) -> None:
-    """Detect objects in one image and print (or write) them as JSON."""
+    """Detect objects in one image (or classify it) and print (or write)
+    the result as JSON."""
     runner = from_pretrained(weights, device=device)
     dets = runner(image, conf)
-    payload = {"image": str(image), "detections": _to_json(dets, runner.class_names)}
+    names = runner.class_names
+    if isinstance(dets, Classification):
+        payload = {"image": str(image), "classes": [
+            {"class_id": c, "class": names[c], "score": round(p, 4)} for c, p in dets.top(5)]}
+    else:
+        payload = {"image": str(image), "detections": _to_json(dets, names)}
     text = json.dumps(payload, indent=2)
     if output is None:
         typer.echo(text)

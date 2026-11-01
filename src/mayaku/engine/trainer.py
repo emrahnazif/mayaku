@@ -42,8 +42,8 @@ from mayaku.data.batch import (
 )
 from mayaku.data.canvas import multi_scale_canvases
 from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
-from mayaku.engine.evaluation import STATS, evaluate, summary
-from mayaku.engine.loss import DetectionLoss
+from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, summary
+from mayaku.engine.loss import ClassifyLoss, DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
 from mayaku.model.quant import fake_quant_disabled, is_qat, observers, ranges_frozen
 from mayaku.utils.checkpoint import SIDECAR_KEY, check_sidecar, save_checkpoint
@@ -298,14 +298,28 @@ class _Unaugmented(Dataset):
 INT8_GAP_WARN = 0.01
 
 
+def primary(model):
+    """The metric a run ranks its epochs by (box AP, or a classifier's
+    top-1) and the stats it logs."""
+    return ("top1", CLS_STATS) if model.task == "classify" else ("AP", STATS)
+
+
+def loss_text(totals, n):
+    """The running loss terms present, as "name value" pairs."""
+    return " ".join("%s %.3f" % (k, float(totals[k]) / n)
+                     for k in ("box", "cls", "dfl") if k in totals)
+
+
 def int8_gap(model, val_ds, n, **kw):
     """Float AP minus int8 AP of a QAT model on the first `n` val images:
     the same weights, BatchNorm and ranges, the int8 simulation off and on.
     Watches what the scored and exported number costs against the float
-    network, so a range that collapses a level shows the epoch it happens."""
-    q = evaluate(model, val_ds, limit=n, **kw)["AP"]
+    network, so a range that collapses a level shows the epoch it happens.
+    (A classifier's top-1, likewise.)"""
+    key = primary(model)[0]
+    q = evaluate(model, val_ds, limit=n, **kw)[key]
     with fake_quant_disabled(model):
-        f = evaluate(model, val_ds, limit=n, **kw)["AP"]
+        f = evaluate(model, val_ds, limit=n, **kw)[key]
     return f - q
 
 
@@ -409,12 +423,15 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     qat = is_qat(model)
     accumulate = max(1, round(r.lr_ref_batch / r.batch))
     opt = build_optimizer(model, r, accumulate)
-    crit = DetectionLoss(nc=model.nc, reg_max=model.cfg.reg_max,
-                         cls_loss=r.cls_loss, warmup=r.assigner_warmup,
-                         atss_soft=r.atss_soft, tal_beta=r.tal_beta,
-                         loc_weight_floor=r.loc_weight_floor,
-                         seg=model.cfg.seg, seg_gain=r.seg_gain, seg_cap=r.seg_cap,
-                         kpt=model.cfg.kpt, obb=model.cfg.obb).to(device)
+    if model.task == "classify":
+        crit = ClassifyLoss(model.nc)
+    else:
+        crit = DetectionLoss(nc=model.nc, reg_max=model.cfg.reg_max,
+                             cls_loss=r.cls_loss, warmup=r.assigner_warmup,
+                             atss_soft=r.atss_soft, tal_beta=r.tal_beta,
+                             loc_weight_floor=r.loc_weight_floor,
+                             seg=model.cfg.seg, seg_gain=r.seg_gain, seg_cap=r.seg_cap,
+                             kpt=model.cfg.kpt, obb=model.cfg.obb).to(device)
     # Built from the plain model before any SyncBatchNorm swap, so the shadow
     # (which rank 0 recalibrates and evaluates alone) never needs its peers.
     ema = EMA(model, r.ema_decay, r.ema_tau) if main else None
@@ -467,7 +484,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         with open(os.path.join(out, "tier.json"), "w") as f:
             json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
         open(log_path, "w").close()
-    records, best = [], resume["best"] if resume else {"AP": -1.0}
+    key, stats = primary(model)
+    records, best = [], resume["best"] if resume else {key: -1.0}
     final_start = r.epochs - r.final_epochs
 
     for epoch in range(start, r.epochs):
@@ -518,10 +536,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                 totals[k] = totals.get(k, 0) + v
             if main and log_every and (i + 1) % log_every == 0:
                 done, spent = i + 1, time.perf_counter() - t0
-                log("  %5d/%-5d  box %.3f cls %.3f dfl %.3f  lr %.5f  "
-                    "%.0f img/s  epoch eta %s"
-                    % (done, len(loader), float(totals["box"]) / done,
-                       float(totals["cls"]) / done, float(totals["dfl"]) / done,
+                log("  %5d/%-5d  %s  lr %.5f  %.0f img/s  epoch eta %s"
+                    % (done, len(loader), loss_text(totals, done),
                        opt.param_groups[0]["lr"], done * r.batch / spent,
                        hms(spent / done * (len(loader) - done))))
 
@@ -543,20 +559,19 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             if qat and r.int8_check_images > 0:
                 rec["int8_gap"] = int8_gap(ema.model, val_ds, r.int8_check_images, device=device,
                                            batch=r.batch, workers=workers, d=r.decode)
-            if rec["AP"] > best["AP"]:
-                best = {"epoch": epoch, **{k: rec[k] for k in STATS}}
+            if rec[key] > best[key]:
+                best = {"epoch": epoch, **{k: rec[k] for k in stats}}
                 if out:
                     save_checkpoint(ema.model, os.path.join(out, "best.pt"), sidecar)
                     with open(os.path.join(out, "best.json"), "w") as f:
                         json.dump(best, f, indent=2)
             gap = rec.get("int8_gap")
-            log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s" % (epoch, rec["box"], rec["cls"], rec["dfl"], summary(rec))
-                + ("" if gap is None else "  int8 vs float %+.1f AP%s"
-                   % (-100 * gap, "  WARNING" if gap > INT8_GAP_WARN else "")))
+            log("epoch %3d  %s  %s" % (epoch, loss_text(rec, 1), summary(rec))
+                + ("" if gap is None else "  int8 vs float %+.1f %s%s"
+                   % (-100 * gap, key, "  WARNING" if gap > INT8_GAP_WARN else "")))
         else:
-            log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s, %s left"
-                % (epoch, rec["box"], rec["cls"], rec["dfl"],
-                   hms(rec["secs"]), hms(left)))
+            log("epoch %3d  %s  %s, %s left"
+                % (epoch, loss_text(rec, 1), hms(rec["secs"]), hms(left)))
         records.append(rec)
         if out:
             with open(log_path, "a") as f:

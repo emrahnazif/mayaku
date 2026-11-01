@@ -157,6 +157,27 @@ class KeypointLoss(nn.Module):
         return oks, vis, hl, ol, len(bi)
 
 
+class ClassifyLoss(nn.Module):
+    """Cross-entropy with label smoothing (Szegedy et al. 2016, arXiv
+    1512.00567; 0.1 as there) on the class map's spatial mean, the
+    classifier's whole objective. `forward` keeps `DetectionLoss`'s
+    signature and its per-image-sum convention, so the trainer drives
+    either."""
+
+    def __init__(self, nc, smoothing=0.1):
+        super().__init__()
+        self.nc, self.smoothing = nc, smoothing
+
+    def forward(self, preds, targets, epoch=0, masks=None):
+        from mayaku.model.classify import logits
+
+        x = logits(preds)
+        # one [image, class] row per image, in image order
+        labels = targets[targets[:, 0].argsort(stable=True), 1].long().to(x.device, non_blocking=True)
+        ce = F.cross_entropy(x, labels, label_smoothing=self.smoothing)
+        return ce * len(x), {"cls": ce.detach()}
+
+
 def dfl_loss(dist_logits, target_dist, reg_max):
     """Cross-entropy split between the two bins straddling the target.
 

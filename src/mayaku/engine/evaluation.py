@@ -28,6 +28,10 @@ KPT_STATS = ("AP", "AP50", "AP75", "AP-M", "AP-L",
              "AR", "AR50", "AR75", "AR-M", "AR-L")
 
 
+# a classifier's scores: top-1 and top-5 accuracy
+CLS_STATS = ("top1", "top5")
+
+
 def to_coco(det, image_id, cat_ids):
     """One image's `Detections` -> COCO bbox result records: xywh, and the
     dense class index mapped back to the annotation file's category id."""
@@ -192,6 +196,38 @@ def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, im
     return out
 
 
+def accuracy(probs, labels):
+    """(n, nc) scores and (n,) labels -> {"top1", "top5"} accuracy."""
+    top = probs.topk(min(5, probs.shape[1]), 1).indices
+    hit = top == labels[:, None]
+    return {"top1": float(hit[:, 0].float().mean()), "top5": float(hit.any(1).float().mean())}
+
+
+@torch.no_grad()
+def evaluate_classifier(model, dataset, device="cpu", batch=16, workers=0, limit=None):
+    """Top-1 / top-5 accuracy of a classifier on a class-folder split
+    (`mayaku.data.folder.FolderDataset`); `limit` scores the first `limit`
+    images."""
+    from torch.utils.data import DataLoader, Subset
+
+    from mayaku.model.classify import logits
+
+    assert model.nc == dataset.nc, (model.nc, dataset.nc)
+    images = Subset(dataset, range(limit)) if limit is not None and limit < len(dataset) else dataset
+    loader = DataLoader(images, batch_size=batch, shuffle=False, num_workers=workers,
+                        collate_fn=collate, pin_memory=device.startswith("cuda"))
+    was_training = model.training
+    model.eval()
+    probs, labels = [], []
+    try:
+        for imgs, targets, _, _ in loader:
+            probs.append(logits(model(batch_to(imgs, device))).softmax(1).cpu())
+            labels.append(targets[:, 1].long())
+    finally:
+        model.train(was_training)
+    return accuracy(torch.cat(probs), torch.cat(labels))
+
+
 @torch.no_grad()
 def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY, limit=None):
     """Run a model over a dataset and return the COCO metrics.
@@ -204,6 +240,8 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY, limit=
     """
     from torch.utils.data import DataLoader, Subset
 
+    if model.task == "classify":
+        return evaluate_classifier(model, dataset, device, batch, workers, limit)
     assert model.nc == dataset.nc, (model.nc, dataset.nc)
     subset = limit is not None and limit < len(dataset)
     images = Subset(dataset, range(limit)) if subset else dataset
@@ -257,8 +295,26 @@ def evaluate_runner(runner, images, annotations, batch=16, log=None) -> dict[str
                  seg=runner.sidecar["mask"] is not None, kpt=kp["num"] if kp else 0)
 
 
+def evaluate_runner_classifier(runner, images, batch=16, log=None) -> dict[str, float]:
+    """Top-1 / top-5 accuracy of a deployed classifier (a `Runner` whose
+    sidecar says `task: classify`) on the class-folder split `images`,
+    through its own preprocessing, graph and precision."""
+    from mayaku.data.folder import load_folder
+
+    data = load_folder(str(images), runner.class_names)
+    probs = []
+    for i in range(0, len(data.files), batch):
+        if log and i and i % (100 * batch) == 0:
+            log("eval %d/%d" % (i, len(data.files)))
+        probs += [c.scores for c in runner.batch(data.files[i:i + batch])]
+    return accuracy(torch.stack(probs), torch.from_numpy(data.labels))
+
+
 def summary(stats, prefix=""):
-    """One line, AP first, size split always present."""
+    """One line, AP first, size split always present; a classifier's
+    top-1 / top-5."""
+    if "top1" in stats:
+        return "%stop1 %.4f  top5 %.4f" % (prefix, stats["top1"], stats["top5"])
     return "%sAP %.4f  AP50 %.4f  AP75 %.4f  S %.4f  M %.4f  L %.4f" % (
         prefix, stats["AP"], stats["AP50"], stats["AP75"],
         stats["AP-S"], stats["AP-M"], stats["AP-L"])

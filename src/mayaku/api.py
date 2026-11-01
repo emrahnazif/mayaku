@@ -36,6 +36,7 @@ from mayaku.backends.device import DeviceKind
 from mayaku.config import MayakuConfig, dump_yaml, merge_overrides, read_yaml
 from mayaku.data import CocoDetection
 from mayaku.data.coco import CocoLabels, load_coco
+from mayaku.data.folder import FolderDataset, FolderLabels, load_folder
 from mayaku.engine.distributed import (
     broadcast_from_main,
     get_world_size,
@@ -45,11 +46,12 @@ from mayaku.engine.distributed import (
     local_device,
     resolve_ddp_device,
 )
-from mayaku.engine.evaluation import evaluate_runner
+from mayaku.engine.evaluation import evaluate_runner, evaluate_runner_classifier, summary
 from mayaku.engine.trainer import load_state
 from mayaku.engine.trainer import train as run
 from mayaku.inference import from_pretrained
 from mayaku.model import load_pretrained
+from mayaku.model.classify import load_backbone
 from mayaku.tuning import apply_auto_config, collect_set_paths
 from mayaku.utils.checkpoint import (
     SIDECAR_KEY,
@@ -62,6 +64,9 @@ from mayaku.utils.checkpoint import (
 from mayaku.utils.download import resolve_weights
 
 __all__ = ["evaluate", "train"]
+
+# a classifier's default canvas side (the ImageNet convention)
+CLASSIFY_SIZE = 224
 
 
 def train(
@@ -81,7 +86,9 @@ def train(
     resume: str | Path | None = None,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Train a detector on a COCO split; returns a result dict.
+    """Train a detector on a COCO split, or a classifier (``model.task``
+    "classify") on class folders, ``train_images/<class>/<image>`` with no
+    annotation files; returns a result dict.
 
     The model comes from ``config``, ``weights``, or both:
 
@@ -121,17 +128,12 @@ def train(
     evaluation, None without a val split), ``best`` (the trainer's best
     epoch metrics), ``train_seconds``, ``eval_seconds`` and ``metadata``.
     """
-    if train_annotations is None or train_images is None:
-        raise ValueError("train_annotations (a COCO JSON) and train_images (its image "
-                         "directory) are required")
-    train_annotations, train_images = Path(train_annotations), Path(train_images)
-    _check_split(train_annotations, train_images)
-    val: tuple[Path, Path] | None = None
-    if val_annotations is not None and val_images is not None:
-        val = Path(val_annotations), Path(val_images)
-        _check_split(*val)
-    elif (val_annotations, val_images) != (None, None):
-        raise ValueError("val_annotations and val_images go together")
+    if train_images is None:
+        raise ValueError("train_images is required: a COCO split's image directory (with "
+                         "train_annotations), or a classifier's class folders")
+    train_images = Path(train_images)
+    paths = [None if p is None else Path(p) for p in (train_annotations, val_annotations, val_images)]
+    train_annotations, val_annotations, val_images = paths
     # Under torchrun every process runs this call and joins the group here;
     # spawned ranks (num_gpus) start below, once the config and data are resolved.
     dev = resolve_ddp_device(device, num_gpus)
@@ -166,16 +168,39 @@ def train(
                 pinned |= collect_set_paths(ov)
         run_dir = Path(output_dir) if output_dir is not None else Path("runs") / stem
 
-    kp = cfg.model.keypoints
-    # oriented boxes are fitted to each object's polygon, so they load like masks
-    coco = load_coco(str(train_images), str(train_annotations),
-                     masks=cfg.model.seg or cfg.model.obb, kpt=kp.num if kp else 0)
-    if state is None:
-        cfg, changes = apply_auto_config(cfg, coco, pinned, finetune=pretrained is not None)
-        for path, old, new in changes:
-            log(f"[mayaku.train] auto-config {path}: {old} -> {new}")
-    elif resumed["class_names"] != coco.class_names:
-        raise ValueError(f"{train_annotations} is not the dataset this run was training on")
+    val: tuple[Path | None, Path] | None = None
+    if cfg.model.task == "classify":
+        # class folders: no annotation files, a validation split is its images alone
+        if train_annotations is not None or val_annotations is not None:
+            raise ValueError("a classifier trains from class folders (images/<class>/...); "
+                             "pass no annotation files")
+        for d in (train_images, val_images):
+            if d is not None and not d.is_dir():
+                raise FileNotFoundError(f"class-folder directory not found: {d}")
+        val = (None, val_images) if val_images is not None else None
+        coco = load_folder(str(train_images))
+        if state is None:
+            cfg, changes = _classifier_config(cfg, coco, pinned)
+    else:
+        if train_annotations is None:
+            raise ValueError("train_annotations (a COCO JSON) is required with train_images")
+        _check_split(train_annotations, train_images)
+        if val_annotations is not None and val_images is not None:
+            val = val_annotations, val_images
+            _check_split(*val)
+        elif (val_annotations, val_images) != (None, None):
+            raise ValueError("val_annotations and val_images go together")
+        kp = cfg.model.keypoints
+        # oriented boxes are fitted to each object's polygon, so they load like masks
+        coco = load_coco(str(train_images), str(train_annotations),
+                         masks=cfg.model.seg or cfg.model.obb, kpt=kp.num if kp else 0)
+        if state is None:
+            cfg, changes = apply_auto_config(cfg, coco, pinned, finetune=pretrained is not None)
+    for path, old, new in changes if state is None else ():
+        log(f"[mayaku.train] auto-config {path}: {old} -> {new}")
+    if state is not None and resumed["class_names"] != coco.class_names:
+        raise ValueError(f"{train_annotations or train_images} is not the dataset this run "
+                         "was training on")
 
     if cfg.train.batch % world:          # the trainer checks too; this fails before spawning
         raise ValueError(f"train.batch {cfg.train.batch} does not split over {world} GPUs; "
@@ -212,7 +237,7 @@ def train(
         metrics = evaluate(final_weights, annotations=val[0], images=val[1],
                            output_dir=run_dir / "eval", device=device)
         eval_seconds = time.time() - t0
-        log(f"[mayaku.train] box AP {metrics['AP']:.4f}")
+        log(f"[mayaku.train] {summary(metrics)}")
 
     cuda = device.startswith("cuda")
     metadata = {
@@ -250,7 +275,7 @@ def train(
 def evaluate(
     weights: str | Path,
     *,
-    annotations: str | Path,
+    annotations: str | Path | None = None,
     images: str | Path,
     output_dir: str | Path | None = None,
     device: str = "auto",
@@ -261,11 +286,21 @@ def evaluate(
     checkpoint, a hosted model name, or an exported artifact, which then runs
     in its own runtime. Returns the flat metrics dict (``AP``, ``AP50``, ...,
     with ``segm_*`` and ``kpt_*`` for models with those heads), also written
-    to ``<output_dir>/metrics.json`` when ``output_dir`` is set."""
-    annotations, images = Path(annotations), Path(images)
-    _check_split(annotations, images)
+    to ``<output_dir>/metrics.json`` when ``output_dir`` is set. A
+    classifier is scored on class folders (``images`` alone, no
+    ``annotations``): ``top1`` and ``top5``."""
     runner = from_pretrained(weights, device=device)
-    metrics: dict[str, Any] = evaluate_runner(runner, images, annotations, log=log)
+    metrics: dict[str, Any]
+    if runner.sidecar.get("task") == "classify":
+        if annotations is not None:
+            raise ValueError("a classifier is scored on class folders; pass images only")
+        metrics = evaluate_runner_classifier(runner, Path(images), log=log)
+    else:
+        if annotations is None:
+            raise ValueError("annotations (a COCO JSON) are required to score a detector")
+        annotations, images = Path(annotations), Path(images)
+        _check_split(annotations, images)
+        metrics = evaluate_runner(runner, images, annotations, log=log)
     if output_dir is not None:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         (Path(output_dir) / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -301,10 +336,10 @@ class _Job:
     warm-start or resume state, and where to write."""
 
     cfg: MayakuConfig
-    coco: CocoLabels
+    coco: CocoLabels | FolderLabels
     train_images: Path
-    train_annotations: Path
-    val: tuple[Path, Path] | None
+    train_annotations: Path | None
+    val: tuple[Path | None, Path] | None
     pretrained: dict[str, Any] | None
     state: dict[str, Any] | None
     train_dir: Path
@@ -318,17 +353,27 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
     cfg, main = job.cfg, is_main_process()
     if not main:
         log = _quiet
-    kp = cfg.model.keypoints
-    labels: dict[str, Any] = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0,
-                                  obb=cfg.model.obb)
     canvas = cfg.input.canvas
-    train_ds = CocoDetection(str(job.train_images), str(job.train_annotations), canvas,
-                             aug=cfg.train.aug, seed=cfg.train.seed, coco=job.coco, **labels)
-    val_ds = None
-    if job.val and main:
-        val_ds = CocoDetection(str(job.val[1]), str(job.val[0]), canvas, **labels)
+    if cfg.model.task == "classify":
+        train_ds = FolderDataset(str(job.train_images), canvas, aug=cfg.train.aug,
+                                 seed=cfg.train.seed, labels=job.coco)
+        val_ds = FolderDataset(str(job.val[1]), canvas,
+                               labels=load_folder(str(job.val[1]), job.coco.class_names)) \
+            if job.val and main else None
+    else:
+        kp = cfg.model.keypoints
+        labels: dict[str, Any] = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0,
+                                      obb=cfg.model.obb)
+        train_ds = CocoDetection(str(job.train_images), str(job.train_annotations), canvas,
+                                 aug=cfg.train.aug, seed=cfg.train.seed, coco=job.coco, **labels)
+        val_ds = CocoDetection(str(job.val[1]), str(job.val[0]), canvas, **labels) \
+            if job.val and main else None
     model = cfg.model.build(canvas)
-    if job.pretrained is not None:
+    if job.pretrained is not None and cfg.model.task == "classify":
+        # the backbone, and the head when it fits
+        info = load_backbone(model, job.pretrained)
+        log("[mayaku.train] backbone warm-started" + ("" if info["head"] else ", head fresh"))
+    elif job.pretrained is not None:
         info = load_pretrained(model, job.pretrained)
         if info["reinitialised"]:
             log(f"[mayaku.train] classifier re-initialised for {model.nc} classes")
@@ -336,6 +381,26 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
         out=str(job.train_dir), workers=cfg.dataloader.num_workers, log=log,
         sidecar=build_sidecar(cfg, job.coco.class_names, model) if main else None,
         resume=job.state)
+
+
+def _classifier_config(cfg: MayakuConfig, data: FolderLabels,
+                       user_set_paths: set[str]) -> tuple[MayakuConfig, list[tuple[str, Any, Any]]]:
+    """A classifier's config from its class folders: the class count, the
+    canvas (square, 224 unless the size budget was set), and the detection
+    heads a warm-start checkpoint may have described turned off. Returns
+    the config and its ``(path, old, new)`` changes."""
+    nc = len(data.class_names)
+    if cfg.model.num_classes not in (None, nc):
+        raise ValueError(f"model.num_classes is {cfg.model.num_classes} and {data.root} "
+                         f"has {nc} class folders")
+    side = cfg.input.size_budget if "input.size_budget" in user_set_paths else CLASSIFY_SIZE
+    ov = {"model": {"num_classes": nc, "seg": False, "keypoints": None, "obb": False},
+          "input": {"size_budget": side, "canvas_hw": cfg.input.canvas_hw or (side, side)}}
+    new = merge_overrides(cfg, ov)
+    before, after = cfg.model_dump(mode="json"), new.model_dump(mode="json")
+    changes = [(f"{g}.{k}", before[g][k], after[g][k]) for g in ov for k in ov[g]
+               if before[g][k] != after[g][k]]
+    return new, changes
 
 
 def _quiet(*_: Any) -> None:

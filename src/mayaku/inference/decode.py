@@ -23,7 +23,8 @@ from mayaku.model import obb as obblib
 from mayaku.model.box import decode_head
 from mayaku.model.detector import split_outputs
 
-__all__ = ["DEPLOY", "Decode", "Detections", "decode", "decode_sidecar", "postprocess"]
+__all__ = ["DEPLOY", "Classification", "Decode", "Detections", "decode", "decode_sidecar",
+           "postprocess"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -81,6 +82,23 @@ class Detections:
 
     def __len__(self) -> int:
         return len(self.scores)
+
+
+@dataclasses.dataclass
+class Classification:
+    """One image's class probabilities (nc,), from a classifier; `label` is
+    the most likely class index, `top(k)` the k best as (index, probability)
+    pairs."""
+
+    scores: torch.Tensor
+
+    @property
+    def label(self) -> int:
+        return int(self.scores.argmax())
+
+    def top(self, k: int = 5) -> list[tuple[int, float]]:
+        p, i = self.scores.topk(min(k, len(self.scores)))
+        return list(zip(i.tolist(), p.tolist(), strict=True))
 
 
 def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
@@ -186,10 +204,16 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=No
     return out
 
 
-def decode_sidecar(preds, metas, sidecar, conf=None) -> list[Detections]:
+def decode_sidecar(preds, metas, sidecar, conf=None) -> list[Detections] | list[Classification]:
     """`decode` with every parameter read from a model's sidecar (see
     `mayaku.utils.checkpoint.build_sidecar`); `conf` overrides the recorded
-    score threshold."""
+    score threshold. A classifier's sidecar (`task: classify`) gives one
+    `Classification` per image instead: the softmax of the class map's
+    spatial mean."""
+    if sidecar.get("task") == "classify":
+        from mayaku.model.classify import logits
+
+        return [Classification(p) for p in logits(preds).softmax(1).cpu()]
     dec = sidecar["decode"]
     d = Decode.from_sidecar(dec, **({} if conf is None else {"conf": conf}))
     kp = sidecar["keypoints"]

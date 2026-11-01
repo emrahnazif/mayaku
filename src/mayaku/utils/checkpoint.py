@@ -74,6 +74,7 @@ def build_sidecar(
         keypoints = {**keypoints, "names": list(kp.names), "flip_pairs": [list(p) for p in kp.flip_pairs]}
     return {
         "schema_version": SIDECAR_SCHEMA_VERSION,
+        "task": spec.get("task", "detect"),
         "config": cfg.model_dump(mode="json"),
         "class_names": list(class_names),
         "canvas_hw": list(canvas),

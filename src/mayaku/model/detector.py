@@ -20,6 +20,8 @@ class Detector(nn.Module):
     The graph runs on any canvas whose sides are multiples of 32; `canvas`
     only sets the classifier's initial object prior (`Head.bias_init`)."""
 
+    task = "detect"
+
     def __init__(self, cfg, nc=80, canvas=640):
         super().__init__()
         self.cfg, self.nc = cfg, nc
