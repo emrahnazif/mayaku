@@ -53,24 +53,27 @@ class Tier:
             "oriented boxes are a task of their own: no masks or keypoints"
 
 
-# Widths are multiples of 32. n and m spend about half their compute in the
-# backbone, at strides 4-16: a two-conv stem into a stride-4 stage, the 3x3s
-# at half width, and global context in the pyramid pooling. s and l push
-# depth and width toward the coarse stages, where parameters are cheap to
-# run, with the bottleneck block making backbone depth cheap enough to spend.
+# Widths are multiples of 32. Every tier spends about half its compute in
+# the backbone, at strides 4-16: a two-conv stem into a stride-4 stage, the
+# 3x3s at half width, and global context in the pyramid pooling, with the
+# neck's stride 32 at about three quarters of the backbone's (narrower lost
+# large objects on m). s and l follow n and m's layout but are not
+# pretrained yet.
 TIERS = {
     # 6.7 GMACs at 640, the backbone 41% of them
     "n": Tier(stem=32, stem_mid=16, s4_depth=2, width=(96, 192, 320), depth=(3, 3, 2),
               expansion=2, global_ctx=True, neck=(64, 128, 256), paths=3, head_width=80),
-    "s": Tier(stem=32, width=(144, 288, 576), depth=(3, 5, 7),
-              neck=(96, 192, 384), paths=3, head_width=96),
+    # about 20 GMACs at 640, the backbone about 41% of them
+    "s": Tier(stem=32, stem_mid=16, s4_depth=2, width=(192, 320, 512), depth=(3, 4, 2),
+              expansion=2, global_ctx=True, neck=(128, 224, 384), paths=3, head_width=128),
     # stride 8 / 16 wider and depth moved off stride 32; a three-path neck
     # with stride 32 at 576 (narrower lost large objects). 46.3 GMACs at 640,
     # the backbone 46% of them
     "m": Tier(stem=64, stem_mid=32, s4_depth=2, width=(288, 448, 768), depth=(4, 4, 3),
               expansion=2, global_ctx=True, neck=(192, 320, 576), paths=3, head_width=192),
-    "l": Tier(stem=64, width=(256, 512, 1024), depth=(4, 8, 10),
-              neck=(256, 512, 1024), paths=5, head_width=256),
+    # about 82 GMACs at 640, the backbone about 48% of them
+    "l": Tier(stem=64, stem_mid=32, s4_depth=2, width=(384, 576, 1024), depth=(4, 6, 3),
+              expansion=2, global_ctx=True, neck=(256, 384, 768), paths=3, head_width=256),
 }
 
 # Not a product tier: a few tens of thousands of parameters, so a test can

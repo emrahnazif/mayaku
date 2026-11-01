@@ -54,7 +54,7 @@ def test_tier_fuse_parity_and_contract(tier: str) -> None:
 
 def test_deploy_parameter_counts() -> None:
     """The locked range: deploy (fused) parameters per tier."""
-    want = {"n": 5.18, "s": 11.93, "m": 32.40, "l": 81.27}
+    want = {"n": 5.18, "s": 13.88, "m": 32.40, "l": 57.91}
     for tier, millions in want.items():
         m = Detector(TIERS[tier], 80).fuse()
         params = sum(p.numel() for p in m.parameters())
