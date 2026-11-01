@@ -27,6 +27,9 @@ class Augment:
     translate: float = 0.1       # random shift, as a fraction of the canvas
     hflip: float = 0.5           # probability of a horizontal flip
     hsv: tuple = (0.015, 0.7, 0.4)  # hue, saturation, value gains
+    # Vertical flip, for data with no up, such as aerial imagery; off by
+    # default. Not for keypoints, whose left / right pairs it would mislabel.
+    vflip: float = 0.0
 
     def __post_init__(self):
         assert 0.0 <= self.mosaic <= 1.0 and 0.0 <= self.mixup <= 1.0

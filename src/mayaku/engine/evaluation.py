@@ -17,6 +17,7 @@ import torch
 from mayaku.data.batch import batch_to, collate
 from mayaku.inference.decode import DEPLOY, decode
 from mayaku.model import kpt as kptlib
+from mayaku.model import obb as obblib
 
 # The order pycocotools returns its twelve numbers in. A size bucket with no
 # ground-truth objects comes back as -1, meaning not applicable, not zero.
@@ -32,8 +33,12 @@ def to_coco(det, image_id, cat_ids):
     dense class index mapped back to the annotation file's category id."""
     box = det.boxes.clone()
     box[:, 2:] -= box[:, :2]
-    return [{"image_id": image_id, "category_id": cat_ids[int(c)], "bbox": b, "score": s}
-            for b, s, c in zip(box.tolist(), det.scores.tolist(), det.labels.tolist(), strict=True)]
+    # oriented: each record also carries its xywhr
+    rb = det.rboxes.tolist() if det.rboxes is not None else [None] * len(det)
+    return [{"image_id": image_id, "category_id": cat_ids[int(c)], "bbox": b, "score": s,
+             **({} if r is None else {"rbox": r})}
+            for b, s, c, r in zip(box.tolist(), det.scores.tolist(), det.labels.tolist(), rb,
+                                  strict=True)]
 
 
 def rle(mask):
@@ -85,6 +90,44 @@ def to_coco_kpt(det, image_id, cat_ids):
             for k in range(len(det))]
 
 
+def _gt_rbox(ann):
+    """A ground-truth annotation's oriented box, fitted to its polygon (or
+    its box where it has none) once, by the same `obb.from_points` the
+    training targets use."""
+    if "rbox" not in ann:
+        from mayaku.data.polygons import Polys
+
+        x, y, w, h = ann["bbox"]
+        parts = Polys.from_coco([ann.get("segmentation")]).parts(0)
+        ann["rbox"] = obblib.from_points([obblib.outline(parts, (x, y, x + w, y + h))])[0].tolist()
+    return ann["rbox"]
+
+
+def rotated_eval(gt, dt):
+    """pycocotools' COCOeval with the exact IoU of oriented boxes
+    (`obb.rotated_iou`) in place of the axis-aligned one; matching, area
+    ranges and the AP / AR summaries are COCO's own. Crowd regions are
+    matched as ordinary objects."""
+    from pycocotools.cocoeval import COCOeval
+
+    class RotatedEval(COCOeval):
+        def computeIoU(self, imgId, catId):
+            p = self.params
+            if p.useCats:
+                g, d = self._gts[imgId, catId], self._dts[imgId, catId]
+            else:
+                g = [a for c in p.catIds for a in self._gts[imgId, c]]
+                d = [a for c in p.catIds for a in self._dts[imgId, c]]
+            if not g or not d:
+                return []
+            order = np.argsort([-a["score"] for a in d], kind="mergesort")
+            d = [d[i] for i in order[:p.maxDets[-1]]]
+            return obblib.rotated_iou(torch.tensor([a["rbox"] for a in d]),
+                                      torch.tensor([_gt_rbox(a) for a in g])).numpy()
+
+    return RotatedEval(gt, dt, "bbox")
+
+
 @functools.cache
 def ground_truth(ann_path):
     """The parsed annotations, once per path. Large annotation files cost
@@ -98,7 +141,9 @@ def ground_truth(ann_path):
 def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
     """COCO metrics for a list of result records; `iou_type` is bbox, segm or
     keypoints (with `k` keypoints per instance). Keypoints report ten
-    numbers, not twelve. `image_ids` scores those images only."""
+    numbers, not twelve. `image_ids` scores those images only. Box records
+    that carry an "rbox" are oriented boxes, scored by their exact rotated
+    IoU against the ground truth's polygons (`rotated_eval`)."""
     from pycocotools.cocoeval import COCOeval
 
     stats = KPT_STATS if iou_type == "keypoints" else STATS
@@ -106,7 +151,8 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
         return dict.fromkeys(stats, 0.0)
     gt = ground_truth(ann_path)
     with contextlib.redirect_stdout(io.StringIO()):
-        e = COCOeval(gt, gt.loadRes(results), iou_type)
+        rotated = iou_type == "bbox" and "rbox" in results[0]
+        e = (rotated_eval if rotated else lambda g, d: COCOeval(g, d, iou_type))(gt, gt.loadRes(results))
         if image_ids is not None:
             e.params.imgIds = sorted(image_ids)
         if iou_type == "keypoints":
@@ -128,7 +174,8 @@ def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, im
     """COCO metrics for `(image_id, Detections)` pairs: box AP, plus mask AP
     under "segm_" and keypoint AP under "kpt_" when the model has those heads.
     Keypoints are scored against `kpt_ann_path` when the file is separate.
-    `image_ids` scores those images only, not the whole file."""
+    `image_ids` scores those images only, not the whole file. Oriented boxes
+    (detections with `rboxes`) are scored by their rotated IoU."""
     results, segm, kpts = [], [], []
     for image_id, det in detections:
         results += to_coco(det, image_id, cat_ids)
@@ -166,14 +213,14 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY, limit=
                         pin_memory=device.startswith("cuda"))
     was_training = model.training
     model.eval()
-    seg, kpt = model.cfg.seg, model.cfg.kpt
+    seg, kpt, obb = model.cfg.seg, model.cfg.kpt, model.cfg.obb
 
     def detections():
         for imgs, _, metas, _ in loader:
             preds = model(batch_to(imgs, device))
             # masks RLE-encoded chunk by chunk: never a whole image's at once
             dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d,
-                          encode_mask=rle_batch if seg else None)
+                          encode_mask=rle_batch if seg else None, obb=obb)
             yield from ((meta["id"], det) for meta, det in zip(metas, dets, strict=True))
 
     try:

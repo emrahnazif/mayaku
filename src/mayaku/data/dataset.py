@@ -1,6 +1,6 @@
 """The COCO detection dataset: letterboxed samples on an (H, W) canvas, with
 mosaic, affine, mixup, colour and flip augmentation, and optional instance
-masks and keypoints carried through every step.
+masks, keypoints or oriented boxes carried through every step.
 
 `aug=None` is the evaluation path: letterbox only, plus the meta needed to map
 detections back to original coordinates. Any `Augment` turns on the training
@@ -40,6 +40,7 @@ from mayaku.data.geometry import (
     warp_kpts,
 )
 from mayaku.data.polygons import Polys
+from mayaku.model import obb as obblib
 from mayaku.model.blocks import as_canvas
 
 
@@ -49,16 +50,23 @@ class CocoDetection(Dataset):
     `canvas` is the network input: a side, or (H, W). Labels come out as the
     [class, x1, y1, x2, y2, has_mask?, keypoints...] rows the loss reads, in
     canvas pixels. `coco` is the already parsed file (`load_coco` with the
-    same `masks` and `kpt`), to save a caller that read it a second parse.
+    same `masks` and `kpt`, and masks on for `obb`), to save a caller that
+    read it a second parse.
+
+    `obb` carries each object's polygon through every geometric step, clips
+    it to the canvas, and appends the object's oriented box (the polygon's
+    minimum-area rectangle, `mayaku.model.obb.from_points`) to its row; an
+    object without a polygon gets its axis-aligned box at angle 0.
     """
 
     def __init__(self, images, annotations, canvas=640, aug=None, seed=0,
-                 masks=False, kpt=0, kpt_annotations=None, coco=None):
+                 masks=False, kpt=0, kpt_annotations=None, coco=None, obb=False):
         self.canvas = as_canvas(canvas)
         self.aug = aug
         self.rng = random.Random(seed)
-        self.masks, self.kpt = masks, kpt
-        self.coco = coco or load_coco(images, annotations, masks=masks, kpt=kpt,
+        self.masks, self.kpt, self.obb = masks, kpt, obb
+        self.polys = masks or obb      # whether polygons travel with the boxes
+        self.coco = coco or load_coco(images, annotations, masks=self.polys, kpt=kpt,
                                       kpt_annotations=kpt_annotations)
 
     # the fields the trainer, the evaluator and the tests read
@@ -103,7 +111,7 @@ class CocoDetection(Dataset):
         """Image i's boxes, polygons and keypoints scaled by `r` and shifted by
         `offset`: where its resized image was pasted."""
         boxes = place(self.coco.labels[i], r, offset)
-        polys = self.coco.polys[i].scaled(r, offset) if self.masks else None
+        polys = self.coco.polys[i].scaled(r, offset) if self.polys else None
         kp = scale_shift_kpts(self.coco.kpts[i], self.kpt, r, offset) if self.kpt else None
         return boxes, polys, kp
 
@@ -132,7 +140,7 @@ class CocoDetection(Dataset):
             parts.append(self._tile_labels(j, r, (xa - sx, ya - sy), (xa, ya, xb, yb)))
         boxes, polys, kps = zip(*parts, strict=True)
         return (canvas, np.concatenate(boxes),
-                functools.reduce(Polys.cat, polys) if self.masks else None,
+                functools.reduce(Polys.cat, polys) if self.polys else None,
                 np.concatenate(kps) if self.kpt else None)
 
     def _tile_labels(self, j, r, offset, tile):
@@ -146,7 +154,7 @@ class CocoDetection(Dataset):
         clipped = np.clip(boxes[:, 1:5], (x1, y1, x1, y1), (x2, y2, x2, y2))
         ok = keep(boxes[:, 1:5], clipped)
         boxes[:, 1:5] = clipped
-        return (boxes[ok], polys.select(ok).clip(tile) if self.masks else None,
+        return (boxes[ok], polys.select(ok).clip(tile) if self.polys else None,
                 unlabel_outside(kp, self.kpt, tile)[ok] if self.kpt else None)
 
     def _single(self, i):
@@ -159,7 +167,7 @@ class CocoDetection(Dataset):
         m = sample_affine(self.rng, self.aug, self.canvas, img.shape[:2])
         img = warp_image(img, m, self.canvas)
         boxes, ok = warp_boxes(boxes, m, self.canvas)
-        if self.masks:
+        if self.polys:
             polys = polys.affine(m).select(ok)
         if self.kpt:
             kp = warp_kpts(kp, self.kpt, m, self.canvas)[ok]
@@ -177,31 +185,50 @@ class CocoDetection(Dataset):
             # lambda ~ Beta(32, 32): close to an even blend
             img = mixup(img, other, rng.betavariate(32.0, 32.0))
             boxes = np.concatenate((boxes, ob))
-            polys = polys.cat(op) if self.masks else None
+            polys = polys.cat(op) if self.polys else None
             kp = np.concatenate((kp, okp)) if self.kpt else None
         img = apply_hsv(img, sample_hsv(rng, aug.hsv))
         if rng.random() < aug.hflip:
             w = self.canvas[1]
             img = img[:, ::-1]
             flip_boxes(boxes, w)
-            if self.masks:
+            if self.polys:
                 polys.flip(w)
             if self.kpt:
                 kp = flip_kpts(kp, self.kpt, w, self.coco.kpt_flip_pairs)
+        if aug.vflip and rng.random() < aug.vflip:
+            assert not self.kpt, "a vertical flip would mislabel keypoints' left / right pairs"
+            h = self.canvas[0]
+            img = img[::-1]
+            boxes[:, [2, 4]] = h - boxes[:, [4, 2]]
+            if self.polys:
+                polys.xy[:, 1] = h - polys.xy[:, 1]
         return img, self._table(boxes, polys, kp)
 
     def _table(self, boxes, polys, kp):
         """The sample's label table and its full-resolution instance map:
         columns [class, x1, y1, x2, y2] then, when carried, has_mask and the
-        3K keypoint values (`mayaku.data.batch.split_extras` order). The
-        map's value at a pixel is row + 1 (`Polys.paint`)."""
+        3K keypoint values (`mayaku.data.batch.split_extras` order), or the
+        oriented box's five xywhr values. The map's value at a pixel is
+        row + 1 (`Polys.paint`)."""
         cols, inst = [boxes], None
         if self.masks:
             inst, has = polys.paint(boxes, self.canvas)
             cols.append(has[:, None].astype(np.float32))
         if self.kpt:
             cols.append(kp)
+        if self.obb:
+            cols.append(self._rboxes(boxes, polys))
         return (np.concatenate(cols, 1) if len(cols) > 1 else boxes), inst
+
+    def _rboxes(self, boxes, polys):
+        """(n, 5) oriented boxes of the rows: each polygon clipped to the
+        canvas, then its minimum-area rectangle; the axis-aligned box where
+        the polygon is missing or clipped away."""
+        ch, cw = self.canvas
+        polys = polys.clip((0, 0, cw, ch))
+        return obblib.from_points([obblib.outline(polys.parts(i), boxes[i, 1:5])
+                                   for i in range(len(boxes))])
 
     def __getitem__(self, i):
         if self.aug is None:

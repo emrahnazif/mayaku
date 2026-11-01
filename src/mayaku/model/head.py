@@ -25,9 +25,13 @@ class Head(Fusible):
 
     Outputs are raw logits. No sigmoid, no DFL expectation, no top-k: those
     run on the host after the graph.
+
+    `obb` adds one angle logit per cell, a 1x1 on the box tower beside the
+    side distances, which the host turns into the box's rotation
+    (`mayaku.model.obb`); the sides are then measured along the box's axes.
     """
 
-    def __init__(self, ch, nc, canvas, reg_max=16, n_conv=2, width=0):
+    def __init__(self, ch, nc, canvas, reg_max=16, n_conv=2, width=0, obb=False):
         super().__init__()
         nl = len(STRIDES)
         chs = per_level(ch, nl)
@@ -48,6 +52,7 @@ class Head(Fusible):
         self.box_tower = tower()
         self.cls = nn.ModuleList(nn.Conv2d(ws[lv], nc, 1) for lv in range(nl))
         self.box = nn.ModuleList(nn.Conv2d(ws[lv], 4 * reg_max, 1) for lv in range(nl))
+        self.ang = nn.ModuleList(nn.Conv2d(ws[lv], 1, 1) for lv in range(nl)) if obb else None
         self.bias_init(nc, canvas)
 
     def bias_init(self, nc, canvas, objects=5):
@@ -74,6 +79,9 @@ class Head(Fusible):
             nn.init.normal_(cls.weight, std=0.01)
             nn.init.constant_(cls.bias, math.log(objects / nc / ((h / s) * (w / s))))
             nn.init.constant_(box.bias, 1.0)
+        # the angle starts at 0 (sigmoid 1/4): most boxes in most data are upright
+        for ang in self.ang or ():
+            nn.init.constant_(ang.bias, -math.log(3.0))
 
     def towers(self, xs):
         """Per level, the (class, box) tower outputs. Split from `readout` so
@@ -87,8 +95,14 @@ class Head(Fusible):
             out.append(self.box[i](b))
         return out
 
+    def outputs(self, cb):
+        """The head's outputs from its tower outputs: the readouts, then the
+        angle maps when it has them (`detector.output_names` order)."""
+        ang = [a(b) for a, (_, b) in zip(self.ang, cb, strict=True)] if self.ang is not None else []
+        return self.readout(cb) + ang
+
     def forward(self, xs):
-        return self.readout(self.towers(xs))
+        return self.outputs(self.towers(xs))
 
     def fuse(self):
         self.tower = nn.ModuleList(fuse_bn_chain(t) for t in self.tower)

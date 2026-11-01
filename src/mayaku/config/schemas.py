@@ -75,6 +75,9 @@ class ModelConfig(_BaseModel):
     (the default) runs on every int8 runtime, TensorRT included; affine uses
     the whole int8 grid on one-sided ReLU outputs, but TensorRT cannot run it.
     Checkpoints from before this setting existed are affine.
+    `obb` predicts oriented boxes (`mayaku.model.obb`), from each object's
+    polygon in the annotations (its minimum-area rectangle); not combined
+    with `seg` or `keypoints`.
     """
 
     tier: TierName = "n"
@@ -83,6 +86,7 @@ class ModelConfig(_BaseModel):
     keypoints: KeypointConfig | None = None
     aux_arm: Literal["box_tower", "tower"] = "box_tower"
     mask_stride: Literal[4, 8] = 8
+    obb: bool = False
     qat: bool = True
     qat_activations: Literal["symmetric", "affine"] = "symmetric"
 
@@ -99,14 +103,15 @@ class ModelConfig(_BaseModel):
         pretrained in float still fine-tunes int8-aware."""
         kp = self.keypoints
         return ModelConfig(tier=self.tier, seg=self.seg, aux_arm=self.aux_arm,
-                           mask_stride=self.mask_stride,
+                           mask_stride=self.mask_stride, obb=self.obb,
                            keypoints=KeypointConfig(num=kp.num) if kp else None)
 
     def to_tier(self) -> Tier:
         """The `mayaku.model.tiers.Tier` this config builds."""
         return dataclasses.replace(TIERS[self.tier], seg=self.seg,
                                    kpt=self.keypoints.num if self.keypoints else 0,
-                                   aux_arm=self.aux_arm, mask_stride=self.mask_stride)
+                                   aux_arm=self.aux_arm, mask_stride=self.mask_stride,
+                                   obb=self.obb)
 
     def build(self, canvas: int | tuple[int, int], num_classes: int | None = None) -> Detector:
         """The detector this config describes, quantization-aware when

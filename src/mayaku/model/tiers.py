@@ -33,6 +33,10 @@ class Tier:
     s4_depth: int = 0
     expansion: int = 4
     global_ctx: bool = False
+    # Oriented boxes: an angle readout per level, sides along the box's axes
+    # (`mayaku.model.obb`). A detection task of its own, so not combined with
+    # the mask / keypoint branches.
+    obb: bool = False
 
     def __post_init__(self):
         n = len(STRIDES)
@@ -45,6 +49,8 @@ class Tier:
         assert self.kpt >= 0 and self.aux_width >= 8
         assert self.mask_stride in (4, 8), self.mask_stride
         assert self.stem_mid >= 0 and self.s4_depth >= 0 and self.expansion in (1, 2, 4)
+        assert not (self.obb and (self.seg or self.kpt)), \
+            "oriented boxes are a task of their own: no masks or keypoints"
 
 
 # Widths are multiples of 32. n and m spend about half their compute in the

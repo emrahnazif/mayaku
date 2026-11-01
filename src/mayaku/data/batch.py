@@ -3,7 +3,8 @@ multi-scale rescaling.
 
 The target table is [image, class, x1, y1, x2, y2] then a tail in a fixed
 order: has_mask (one column) when the dataset carries masks, then the 3K
-keypoint values when it carries keypoints. `split_extras` owns that order.
+keypoint values when it carries keypoints; or, for oriented boxes, the five
+xywhr values. `split_extras` and `rboxes_of` own that order.
 """
 
 import numpy as np
@@ -20,6 +21,12 @@ def split_extras(extras, seg, k):
     has_mask = extras[..., 0] if seg and extras.shape[-1] >= 1 else None
     kpts = extras[..., ko:ko + 3 * k] if k and extras.shape[-1] >= ko + 3 * k else None
     return has_mask, kpts
+
+
+def rboxes_of(extras):
+    """(..., E) tail columns of an oriented-box table -> its (..., 5) xywhr
+    (a view). Oriented boxes ride alone, so they are the whole tail."""
+    return extras[..., :5]
 
 
 def seed_worker(worker_id):
@@ -69,14 +76,17 @@ def collate(batch):
             torch.stack([b["masks"] for b in batch]) if "masks" in batch[0] else None)
 
 
-def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
+def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0, obb=False):
     """Resize one rendered batch to `size` (h, w) for multi-scale
     training (`mayaku.data.canvas.multi_scale_canvases` gives the sizes).
 
     The dataset renders at the operating point, the maximum; this downscales
     the batch, so there is only ever one resize and it never invents detail.
     Box and keypoint x / y scale by the same per-axis ratios as the image, and
-    the full-resolution instance map resizes nearest so its integer indices
+    an oriented box's centre too, its sides by the geometric mean of the
+    two (the ratios differ only by the canvas's rounding to the stride, and
+    an exactly unequal scale would shear the box into no rectangle); the
+    full-resolution instance map resizes nearest so its integer indices
     survive -- "nearest-exact", the pixel-centre rule; plain "nearest" floors
     and drifts the map up-left. Coordinates stay in pixels of the resized
     batch.
@@ -96,6 +106,11 @@ def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
             xyv = kp.view(len(targets), kpt, 3)
             xyv[..., 0] *= rx
             xyv[..., 1] *= ry
+        if obb:
+            rb = rboxes_of(targets[:, 6:])
+            rb[:, 0] *= rx
+            rb[:, 1] *= ry
+            rb[:, 2:4] *= (rx * ry) ** 0.5
     if masks is not None:
         masks = F.interpolate(masks[:, None], size=(h, w), mode="nearest-exact")[:, 0]
     return imgs, targets, masks

@@ -12,6 +12,10 @@ Three detection terms:
                   distance, which is what lets the box branch express
                   uncertainty about an edge instead of guessing a number.
 
+Oriented boxes keep the three terms: the box term is 1 - ProbIoU (which
+also trains the angle), the distribution term's sides are measured along the
+box's own axes (`mayaku.model.obb`).
+
 The loss reads the training graph. Nothing here exists at deploy: the
 sigmoid, the softmax expectation and the decode run on the host.
 """
@@ -21,12 +25,13 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mayaku.data.batch import split_extras
+from mayaku.data.batch import rboxes_of, split_extras
 from mayaku.engine.assign import AssignInput, WarmupAssigner
 from mayaku.engine.distributed import get_world_size
 from mayaku.model import box as boxlib
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
+from mayaku.model import obb as obblib
 from mayaku.model.box import decode_head
 from mayaku.model.detector import split_outputs
 
@@ -198,7 +203,7 @@ class DetectionLoss(nn.Module):
                  warmup=5, box_gain=7.5, cls_gain=0.5, dfl_gain=1.5,
                  atss_soft=False, tal_beta=6.0, loc_weight_floor=0.0,
                  seg=False, seg_gain=2.0, seg_cap=250, kpt=0,
-                 kpt_gains=(12.0, 1.0, 1.0, 1.0)):
+                 kpt_gains=(12.0, 1.0, 1.0, 1.0), obb=False):
         super().__init__()
         assert cls_loss in ("bce", "vfl"), cls_loss
         self.nc, self.reg_max = nc, reg_max
@@ -213,6 +218,7 @@ class DetectionLoss(nn.Module):
         self.kpt = KeypointLoss(kpt) if kpt else None
         self.k = kpt
         self.kpt_gains = kpt_gains
+        self.obb = obb
 
     def forward(self, preds, targets, epoch=0, masks=None):
         """preds: the model's tensors, head first. targets: (n, 6 + E) rows of
@@ -229,6 +235,12 @@ class DetectionLoss(nn.Module):
         # hundred bytes either way
         gt_labels, gt_boxes, mask_gt, extras = (
             t.to(device, non_blocking=True) for t in pad_targets(targets, b))
+        grp = split_outputs(preds, seg=self.seg is not None, kpt=self.kpt is not None,
+                            obb=self.obb)
+        if self.obb:
+            # oriented: the assigner and the box terms work on xywhr
+            pd_boxes = obblib.decode_head(grp["ang"], pd_dist, points, stride, self.reg_max)
+            gt_boxes = rboxes_of(extras)
         with torch.no_grad():
             a = self.assigner(AssignInput(
                 pd_cls.detach().sigmoid(), pd_boxes.detach(), points, stride,
@@ -259,9 +271,13 @@ class DetectionLoss(nn.Module):
             if self.loc_weight_floor:
                 weight = weight.clamp(min=self.loc_weight_floor)
             pos_boxes = tgt_boxes[bi, ni]
-            iou = boxlib.iou_xyxy(pd_boxes[bi, ni], pos_boxes, ciou=True)[..., None]
+            if self.obb:
+                iou = obblib.probiou(pd_boxes[bi, ni].float(), pos_boxes)[..., None]
+                tgt_ltrb = obblib.encode(pos_boxes, points[ni], stride[ni], self.reg_max)
+            else:
+                iou = boxlib.iou_xyxy(pd_boxes[bi, ni], pos_boxes, ciou=True)[..., None]
+                tgt_ltrb = boxlib.xyxy_to_ltrb(pos_boxes, points[ni], stride[ni], self.reg_max)
             box = ((1 - iou) * weight).sum() / norm
-            tgt_ltrb = boxlib.xyxy_to_ltrb(pos_boxes, points[ni], stride[ni], self.reg_max)
             dfl = (dfl_loss(pd_dist[bi, ni].view(-1, 4, self.reg_max),
                             tgt_ltrb, self.reg_max) * weight).sum() / norm
         else:
@@ -274,7 +290,6 @@ class DetectionLoss(nn.Module):
         # every output in the graph, even with no positives this step, so no
         # parameter is ever left without a gradient (DDP requires it)
         aux = sum(p.sum() for p in preds) * 0
-        grp = split_outputs(preds, seg=self.seg is not None, kpt=self.kpt is not None)
         has_mask, gt_kpts = split_extras(extras, self.seg is not None, self.k)
         if self.seg is not None and masks is not None and has_mask is not None:
             seg, n = self.seg(grp["mask"], grp["ker"], a, points, stride,

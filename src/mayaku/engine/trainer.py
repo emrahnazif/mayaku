@@ -414,7 +414,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                          atss_soft=r.atss_soft, tal_beta=r.tal_beta,
                          loc_weight_floor=r.loc_weight_floor,
                          seg=model.cfg.seg, seg_gain=r.seg_gain, seg_cap=r.seg_cap,
-                         kpt=model.cfg.kpt).to(device)
+                         kpt=model.cfg.kpt, obb=model.cfg.obb).to(device)
     # Built from the plain model before any SyncBatchNorm swap, so the shadow
     # (which rank 0 recalibrates and evaluates alone) never needs its peers.
     ema = EMA(model, r.ema_decay, r.ema_tau) if main else None
@@ -494,7 +494,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             if ms_sizes:                        # multi-scale: one size per batch
                 s = ms_sizes[torch.randint(len(ms_sizes), (1,)).item()]
                 imgs, targets, masks = rescale_batch(
-                    imgs, targets, masks, s, model.cfg.seg, model.cfg.kpt)
+                    imgs, targets, masks, s, model.cfg.seg, model.cfg.kpt, model.cfg.obb)
             step = (i + 1) % accumulate == 0
             # gradients are only exchanged on the micro-batch that steps
             no_sync = fwd.no_sync() if world > 1 and not step else contextlib.nullcontext()

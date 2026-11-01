@@ -15,7 +15,9 @@ Both report starvation: real objects that received zero positive anchors and
 therefore contribute nothing to the box loss. Starvation is a sub-stride
 phenomenon; above one stride it is zero.
 
-Shapes throughout: B batch, N anchors, M padded ground-truth slots.
+Shapes throughout: B batch, N anchors, M padded ground-truth slots. Boxes
+are xyxy, or xywhr for oriented boxes (five values per box), where the overlap
+is ProbIoU and "inside" means inside the rotated box (`mayaku.model.obb`).
 """
 
 import dataclasses
@@ -23,6 +25,7 @@ import dataclasses
 import torch
 import torch.nn.functional as F
 
+from mayaku.model import obb
 from mayaku.model.blocks import STRIDES
 from mayaku.model.box import iou_xyxy
 
@@ -33,13 +36,22 @@ class AssignInput:
     new assigner drops in as another class with the same `__call__`."""
 
     pd_scores: torch.Tensor    # (B, N, nc) sigmoid probabilities
-    pd_boxes: torch.Tensor     # (B, N, 4) xyxy pixels
+    pd_boxes: torch.Tensor     # (B, N, 4) xyxy pixels, or (B, N, 5) xywhr
     points: torch.Tensor       # (N, 2) anchor centres in pixels
     stride: torch.Tensor       # (N, 1)
     n_per_level: tuple         # anchors per pyramid level, fine to coarse
     gt_labels: torch.Tensor    # (B, M, 1)
-    gt_boxes: torch.Tensor     # (B, M, 4) xyxy pixels
+    gt_boxes: torch.Tensor     # (B, M, 4) xyxy pixels, or (B, M, 5) xywhr
     mask_gt: torch.Tensor      # (B, M, 1), 1 where the slot holds a real object
+
+    @property
+    def oriented(self):
+        return self.gt_boxes.shape[-1] == 5
+
+    def inside(self):
+        """(B, M, N) bool: anchor centre inside the (widened) object."""
+        return (obb.inside(self.points, self.gt_boxes) if self.oriented
+                else candidates_in_gt(self.points, self.gt_boxes))
 
 
 @dataclasses.dataclass
@@ -108,7 +120,7 @@ def gather_targets(mask_pos, tiebreak, inp, nc):
     owner = (mask_pos * index).amax(-2).long()
     flat = owner + torch.arange(b, device=mask_pos.device)[:, None] * m
     labels = inp.gt_labels.long().flatten()[flat]
-    boxes = inp.gt_boxes.reshape(-1, 4)[flat]
+    boxes = inp.gt_boxes.reshape(-1, inp.gt_boxes.shape[-1])[flat]
     scores = (F.one_hot(labels.clamp(0, nc - 1), nc) * fg[..., None]).to(boxes.dtype)
     starved = (mask_pos.sum(-1) == 0) & inp.mask_gt[..., 0].bool()
     return Assignment(labels, boxes, scores, fg, starved, owner), mask_pos
@@ -140,15 +152,19 @@ class TaskAlignedAssigner:
     def __call__(self, inp):
         # CIoU, clamped at zero. With beta 6 the overlap term dominates the
         # metric, so CIoU's centre and aspect penalties change which anchors
-        # are selected, not merely how they are weighted.
-        overlaps = iou_xyxy(inp.gt_boxes[:, :, None, :],
-                            inp.pd_boxes[:, None, :, :], ciou=True).clamp_(0)
+        # are selected, not merely how they are weighted. Oriented boxes use
+        # ProbIoU, the overlap their box loss optimises.
+        if inp.oriented:
+            overlaps = obb.probiou(inp.gt_boxes[:, :, None, :], inp.pd_boxes[:, None, :, :])
+        else:
+            overlaps = iou_xyxy(inp.gt_boxes[:, :, None, :],
+                                inp.pd_boxes[:, None, :, :], ciou=True).clamp_(0)
         idx = inp.gt_labels.long().squeeze(-1).clamp(0, self.nc - 1)
         scores = inp.pd_scores.permute(0, 2, 1).gather(
             1, idx[..., None].expand(-1, -1, inp.pd_scores.shape[1]))
         align = scores.pow(self.alpha) * overlaps.pow(self.beta)
 
-        inside = candidates_in_gt(inp.points, inp.gt_boxes)
+        inside = inp.inside()
         align = align * inside * inp.mask_gt
         top = align.topk(min(self.topk, align.shape[-1]), dim=-1)
         mask_topk = torch.zeros_like(align, dtype=torch.bool).scatter_(
@@ -194,9 +210,11 @@ class ATSSAssigner:
     def __call__(self, inp):
         half = self.scale * inp.stride / 2
         anchors = torch.cat((inp.points - half, inp.points + half), -1)
-        overlaps = iou_xyxy(inp.gt_boxes[:, :, None, :], anchors[None, None]).clamp_(0)
+        # oriented boxes: the pseudo-anchors are scored against their hull
+        hull = obb.to_xyxy(inp.gt_boxes) if inp.oriented else inp.gt_boxes
+        overlaps = iou_xyxy(hull[:, :, None, :], anchors[None, None]).clamp_(0)
 
-        centres = (inp.gt_boxes[..., :2] + inp.gt_boxes[..., 2:]) / 2
+        centres = (hull[..., :2] + hull[..., 2:]) / 2
         dist = (centres[:, :, None, :] - inp.points[None, None]).pow(2).sum(-1)
 
         near = torch.zeros_like(dist, dtype=torch.bool)
@@ -210,8 +228,7 @@ class ATSSAssigner:
         mean, std = masked_mean_std(overlaps, near)
         thr = torch.minimum(mean + std,
                             overlaps.masked_fill(~near, -1).amax(-1, keepdim=True))
-        mask_pos = (near & (overlaps >= thr)
-                    & candidates_in_gt(inp.points, inp.gt_boxes)
+        mask_pos = (near & (overlaps >= thr) & inp.inside()
                     & inp.mask_gt.bool()).to(overlaps.dtype)
 
         # a flat target of 1: the alignment metric is meaningless this early,
@@ -222,8 +239,9 @@ class ATSSAssigner:
             # predicted box. Without it the classifier is trained to answer
             # 1.0 on every positive regardless of how well the box fits, so
             # confidence carries no ordering, and AP is a ranking metric.
-            pred = iou_xyxy(inp.gt_boxes[:, :, None, :],
-                            inp.pd_boxes[:, None, :, :]).clamp_(0)
+            pred = (obb.probiou(inp.gt_boxes[:, :, None, :], inp.pd_boxes[:, None, :, :])
+                    if inp.oriented else
+                    iou_xyxy(inp.gt_boxes[:, :, None, :], inp.pd_boxes[:, None, :, :]).clamp_(0))
             best = (pred * mask_pos).amax(-1)
             out.scores = out.scores * (mask_pos * best[..., None]).amax(-2)[..., None]
         return out

@@ -26,7 +26,8 @@ class Detector(nn.Module):
         self.backbone = Backbone(cfg)
         self.neck = FPG(cfg.width, cfg.neck, cfg.paths)
         self.head = Head(cfg.neck, nc, as_canvas(canvas), reg_max=cfg.reg_max,
-                         n_conv=cfg.head_conv, width=cfg.head_width)
+                         n_conv=cfg.head_conv, width=cfg.head_width,
+                         obb=cfg.obb)
         self.aux = None
         if cfg.seg or cfg.kpt:
             self.aux = AuxBranch(per_level(cfg.neck, len(STRIDES)), self.head.widths,
@@ -36,23 +37,23 @@ class Detector(nn.Module):
 
     def split(self, preds):
         """`forward`'s flat list -> named groups."""
-        return split_outputs(preds, seg=self.cfg.seg, kpt=self.cfg.kpt)
+        return split_outputs(preds, seg=self.cfg.seg, kpt=self.cfg.kpt, obb=self.cfg.obb)
 
     @property
     def out_names(self):
-        return output_names(seg=self.cfg.seg, kpt=self.cfg.kpt)
+        return output_names(seg=self.cfg.seg, kpt=self.cfg.kpt, obb=self.cfg.obb)
 
     def readouts(self):
         """Output projections, as opposed to hidden layers (the optimizer
         treats them differently)."""
-        r = list(self.head.cls) + list(self.head.box)
+        r = list(self.head.cls) + list(self.head.box) + list(self.head.ang or [])
         return r + (self.aux.readouts() if self.aux else [])
 
     def forward(self, x):
         stem, feats = self.backbone(x)
         feats = self.neck(feats)
         cb = self.head.towers(feats)
-        out = self.head.readout(cb)
+        out = self.head.outputs(cb)
         if self.aux is not None:
             out = out + self.aux(feats, [b for _, b in cb], stem)
         return out
@@ -90,6 +91,9 @@ class Detector(nn.Module):
                      "kernel_layout": [list(layer) for layer in KERNEL_LAYOUT]} if self.cfg.seg else None,
             "keypoints": {"num": self.cfg.kpt, "sigmas": list(sigma_values(self.cfg.kpt))}
                          if self.cfg.kpt else None,
+            # the angle readout's decode: theta = (sigmoid(x) - 1/4) * pi, sides
+            # along the box's axes, NMS on ProbIoU (`mayaku.model.obb`)
+            "obb": {"angle": "(sigmoid(x) - 0.25) * pi", "nms": "probiou"} if self.cfg.obb else None,
         }
 
 
@@ -97,12 +101,15 @@ def build(tier="n", nc=80):
     return Detector(TIERS[tier], nc)
 
 
-def output_names(seg=False, kpt=0):
+def output_names(seg=False, kpt=0, obb=False):
     """The model's outputs, in order: cls/box interleaved per level, then, if
-    present, mask + one kernel map per level, then heat + one keypoint map per
-    level. The single owner of that layout; `split_outputs` groups by it."""
+    present, one angle map per level, then mask + one kernel map per level,
+    then heat + one keypoint map per level. The single owner of that
+    layout; `split_outputs` groups by it."""
     nl = range(len(STRIDES))
     names = ["%s%d" % (kind, i) for i in nl for kind in ("cls", "box")]
+    if obb:
+        names += ["ang%d" % i for i in nl]
     if seg:
         names += ["mask"] + ["ker%d" % i for i in nl]
     if kpt:
@@ -110,11 +117,14 @@ def output_names(seg=False, kpt=0):
     return names
 
 
-def split_outputs(preds, seg=False, kpt=0):
+def split_outputs(preds, seg=False, kpt=0, obb=False):
     """The flat output list -> named groups: `head` is the detection tensors,
-    `mask` / `heat` single maps, `ker` / `kpt` lists of one map per level."""
-    named = dict(zip(output_names(seg, kpt), preds, strict=True))
+    `ang` the angle maps, `mask` / `heat` single maps, `ker` / `kpt` lists of
+    one map per level."""
+    named = dict(zip(output_names(seg, kpt, obb), preds, strict=True))
     g = {"head": [named[n] for n in named if n[:3] in ("cls", "box")]}
+    if obb:
+        g["ang"] = [named[n] for n in named if n.startswith("ang")]
     if seg:
         g["mask"], g["ker"] = named["mask"], [named[n] for n in named if n.startswith("ker")]
     if kpt:
@@ -122,11 +132,12 @@ def split_outputs(preds, seg=False, kpt=0):
     return g
 
 
-# Which checkpoint keys may be absent on one side. The auxiliary branch is
-# detachable, so its keys (`aux.`) may exist on either side alone; a model
-# trained quantization-aware carries activation observers (`.act_fq.`) a plain
-# one lacks; and the classifier (`head.cls.`) depends on the class count.
-AUX_KEY, QAT_KEY, CLASS_KEY = "aux.", ".act_fq.", "head.cls."
+# Which checkpoint keys may be absent on one side. The auxiliary branch and
+# the angle readout are detachable, so their keys (`aux.`, `head.ang`) may
+# exist on either side alone; a model trained quantization-aware carries
+# activation observers (`.act_fq.`) a plain one lacks; and the classifier
+# (`head.cls.`) depends on the class count.
+AUX_KEY, QAT_KEY, CLASS_KEY, ANG_KEY = "aux.", ".act_fq.", "head.cls.", "head.ang"
 
 
 def _load(model, state, optional, reinit_classes):
@@ -149,10 +160,11 @@ def _load(model, state, optional, reinit_classes):
 def load_pretrained(model, state):
     """Warm-start `model` from pretrained weights of the same tier: the
     classifier is re-initialised when the class count changes, and the
-    auxiliary branch and QAT observers may be present on either side alone.
+    auxiliary branch, the angle readout and QAT observers may be present on
+    either side alone.
     Anything else that fails to match (another tier) raises. Returns
     {"reinitialised", "missing", "unexpected"} key lists."""
-    return _load(model, state, lambda k: k.startswith(AUX_KEY) or QAT_KEY in k,
+    return _load(model, state, lambda k: k.startswith((AUX_KEY, ANG_KEY)) or QAT_KEY in k,
                  reinit_classes=True)
 
 

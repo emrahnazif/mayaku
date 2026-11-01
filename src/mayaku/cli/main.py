@@ -29,6 +29,7 @@ from mayaku.config import parse_assignments
 from mayaku.engine.evaluation import rle
 from mayaku.inference import Detections, Predictor, from_pretrained
 from mayaku.inference.export import TARGETS
+from mayaku.model import obb
 from mayaku.utils.download import (
     DEFAULT_MANIFEST_URL,
     download_model,
@@ -181,7 +182,8 @@ def _download(
 
 def _to_json(dets: Detections, class_names: list[str]) -> list[dict[str, Any]]:
     """`Detections` as one JSON object per detection: an xyxy box in the
-    image's pixels, keypoints as (x, y, visibility), a mask as COCO RLE."""
+    image's pixels, keypoints as (x, y, visibility), a mask as COCO RLE, an
+    oriented box as (cx, cy, w, h, theta in radians) plus its four corners."""
     out = []
     for k in range(len(dets)):
         c = int(dets.labels[k])
@@ -192,6 +194,9 @@ def _to_json(dets: Detections, class_names: list[str]) -> list[dict[str, Any]]:
             d["keypoints"] = [[round(v, 2) for v in p] for p in dets.keypoints[k].tolist()]
         if dets.masks is not None:
             d["segmentation"] = rle(dets.masks[k])
+        if dets.rboxes is not None:
+            d["rbox_xywhr"] = [round(v, 4) for v in dets.rboxes[k].tolist()]
+            d["corners"] = [[round(v, 2) for v in p] for p in obb.corners(dets.rboxes[k]).tolist()]
         out.append(d)
     return out
 

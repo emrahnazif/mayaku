@@ -84,6 +84,7 @@ def build_sidecar(
         "preprocess": dict(PREPROCESS),
         "mask": spec["mask"],
         "keypoints": keypoints,
+        "obb": spec["obb"],
         "quant": {"qat": spec["qat"],
                   "weights": "int8 per-channel symmetric",
                   "activations": f"int8 per-tensor {spec['activations']}" if spec["qat"] else None},

@@ -167,8 +167,9 @@ def train(
         run_dir = Path(output_dir) if output_dir is not None else Path("runs") / stem
 
     kp = cfg.model.keypoints
-    labels = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0)
-    coco = load_coco(str(train_images), str(train_annotations), **labels)
+    # oriented boxes are fitted to each object's polygon, so they load like masks
+    coco = load_coco(str(train_images), str(train_annotations),
+                     masks=cfg.model.seg or cfg.model.obb, kpt=kp.num if kp else 0)
     if state is None:
         cfg, changes = apply_auto_config(cfg, coco, pinned, finetune=pretrained is not None)
         for path, old, new in changes:
@@ -318,7 +319,8 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
     if not main:
         log = _quiet
     kp = cfg.model.keypoints
-    labels: dict[str, Any] = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0)
+    labels: dict[str, Any] = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0,
+                                  obb=cfg.model.obb)
     canvas = cfg.input.canvas
     train_ds = CocoDetection(str(job.train_images), str(job.train_annotations), canvas,
                              aug=cfg.train.aug, seed=cfg.train.seed, coco=job.coco, **labels)
