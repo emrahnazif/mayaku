@@ -25,6 +25,14 @@ class Tier:
     aux_arm: str = "box_tower"      # per-anchor aux outputs read from: "box_tower" | "tower"
     aux_width: int = 64             # trunk width of the aux branch (and of its own towers)
     mask_stride: int = 8            # stride of the mask feature: 8 (the trunk's) or 4
+    # Backbone layout: `stem_mid` > 0 gives the two-conv stem 3 -> stem_mid
+    # -> stem, `s4_depth` bottlenecks at stride 4, `expansion` the bottleneck
+    # ratio of every block, `global_ctx` the global-context term in the
+    # spatial pyramid pooling.
+    stem_mid: int = 0
+    s4_depth: int = 0
+    expansion: int = 4
+    global_ctx: bool = False
 
     def __post_init__(self):
         n = len(STRIDES)
@@ -36,18 +44,25 @@ class Tier:
         assert self.aux_arm in ("box_tower", "tower"), self.aux_arm
         assert self.kpt >= 0 and self.aux_width >= 8
         assert self.mask_stride in (4, 8), self.mask_stride
+        assert self.stem_mid >= 0 and self.s4_depth >= 0 and self.expansion in (1, 2, 4)
 
 
-# Widths are multiples of 32. Depth and width are pushed toward the coarse
-# stages, where parameters are cheap to run, and the bottleneck block makes
-# backbone depth cheap enough to spend.
+# Widths are multiples of 32. n and m spend about half their compute in the
+# backbone, at strides 4-16: a two-conv stem into a stride-4 stage, the 3x3s
+# at half width, and global context in the pyramid pooling. s and l push
+# depth and width toward the coarse stages, where parameters are cheap to
+# run, with the bottleneck block making backbone depth cheap enough to spend.
 TIERS = {
-    "n": Tier(stem=24, width=(64, 160, 320), depth=(3, 5, 7),
-              neck=(64, 128, 256), paths=3, head_width=80),
+    # 6.7 GMACs at 640, the backbone 41% of them
+    "n": Tier(stem=32, stem_mid=16, s4_depth=2, width=(96, 192, 320), depth=(3, 3, 2),
+              expansion=2, global_ctx=True, neck=(64, 128, 256), paths=3, head_width=80),
     "s": Tier(stem=32, width=(144, 288, 576), depth=(3, 5, 7),
               neck=(96, 192, 384), paths=3, head_width=96),
-    "m": Tier(stem=64, width=(192, 384, 768), depth=(4, 8, 10),
-              neck=(192, 384, 768), paths=4, head_width=192),
+    # stride 8 / 16 wider and depth moved off stride 32; a three-path neck
+    # with stride 32 at 576 (narrower lost large objects). 46.3 GMACs at 640,
+    # the backbone 46% of them
+    "m": Tier(stem=64, stem_mid=32, s4_depth=2, width=(288, 448, 768), depth=(4, 4, 3),
+              expansion=2, global_ctx=True, neck=(192, 320, 576), paths=3, head_width=192),
     "l": Tier(stem=64, width=(256, 512, 1024), depth=(4, 8, 10),
               neck=(256, 512, 1024), paths=5, head_width=256),
 }

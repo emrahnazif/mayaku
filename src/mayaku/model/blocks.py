@@ -220,19 +220,21 @@ class Bottleneck(nn.Module):
 
 
 class Stem(nn.Module):
-    """Three 3x3 convolutions to stride 4, kept narrow.
+    """3x3 convolutions to stride 4.
 
-    A three-3x3 stem (ResNet-C, He et al. 2019) beats a single large-kernel
-    one, and stride-4 width is the most expensive width in the network, so:
-    three convs, few channels.
+    By default three, kept narrow: a three-3x3 stem (ResNet-C, He et al.
+    2019) beats a single large-kernel one. With `mid` it is two, 3 -> `mid`
+    -> `cout`, both strided: the stride-2 3x3 between them costs more than
+    the whole stride-8 stage of the narrow default, and a tier that puts
+    blocks at stride 4 (`Tier.s4_depth`) spends that compute there instead.
     """
 
-    def __init__(self, cout):
+    def __init__(self, cout, mid=0):
         super().__init__()
-        mid = max(8, cout // 2)
-        self.c1 = RepConv3x3(3, mid, 2)
-        self.c2 = RepConv3x3(mid, mid, 1)
-        self.c3 = RepConv3x3(mid, cout, 2)
+        m = mid or max(8, cout // 2)
+        self.c1 = RepConv3x3(3, m, 2)
+        self.c2 = nn.Identity() if mid else RepConv3x3(m, m, 1)
+        self.c3 = RepConv3x3(m, cout, 2)
 
     def forward(self, x):
         return self.c3(self.c2(self.c1(x)))
@@ -250,15 +252,38 @@ class SPPFAdd(nn.Module):
 
     Six 3x3 maxpools cost 54 comparisons against three 5x5 pools at 75, so
     this is also cheaper than the concat form.
+
+    With `global_ctx` the chain continues until every position holds the
+    maximum over the whole map, and that global term joins the sum through
+    a 1x1 -> ReLU -> 1x1 bottleneck: the global-context block (GCNet, Cao et
+    al. 2019, arXiv 1904.11492, finds attention maps nearly identical for
+    every query, so one context term added back is most of attention's
+    gain), pooled by max, which PSPNet finds as good as the average, in the
+    five ops. The chain length follows the input, max(h, w) - 1 pools in
+    all, so the term stays global on any canvas the graph is built for (an
+    exported graph has its pool count fixed at export, like its shape). Its
+    last projection starts at zero: the block starts as the plain one and
+    warm-starts from it exactly.
     """
 
-    def __init__(self, c):
+    def __init__(self, c, global_ctx=False):
         super().__init__()
         mid = c // 2
         self.pre = ConvBNReLU(c, mid, 1)
         self.pool = nn.MaxPool2d(3, 1, 1)
         self.proj = nn.ModuleList(ConvBN(mid, c, 1) for _ in range(4))
         self.rq = nn.ModuleList(ResidualQuant() for _ in range(3))   # running sums
+        self.ctx = self.ctx_out = self.rq_ctx = None
+        if global_ctx:
+            # plain biased convs, no BatchNorm: the global term is the same at
+            # every position, so a BatchNorm there would see one value per
+            # image and a small fine-tuning batch would make it noise
+            hid = max(8, c // 4)
+            self.ctx = nn.Conv2d(mid, hid, 1)
+            self.ctx_out = nn.Conv2d(hid, c, 1)
+            nn.init.zeros_(self.ctx_out.weight)
+            nn.init.zeros_(self.ctx_out.bias)
+            self.rq_ctx = ResidualQuant()
 
     def forward(self, x):
         t = self.pre(x)
@@ -268,6 +293,12 @@ class SPPFAdd(nn.Module):
         y = self.proj[0](t)
         for proj, scale, rq in zip(self.proj[1:], (p2, p4, p6), self.rq, strict=True):
             y = proj(scale) + rq(y)
+        if self.ctx is not None:
+            # max(h, w) - 1 pools reach every position; p6 has had 6
+            g = p6
+            for _ in range(max(t.shape[-2:]) - 1 - 6):
+                g = self.pool(g)
+            y = self.ctx_out(F.relu(self.ctx(g))) + self.rq_ctx(y)
         return F.relu(y)
 
 

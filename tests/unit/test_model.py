@@ -18,19 +18,23 @@ from mayaku.model import (
     load_pretrained,
     load_weights,
 )
-from mayaku.model.blocks import as_canvas
+from mayaku.model.blocks import SPPFAdd, as_canvas
 from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx
 from mayaku.model.quant import qdq_export
 
 onnx = pytest.importorskip("onnx")
 
 SEG_KPT = dataclasses.replace(TINY, seg=True, kpt=3)
+# every backbone-layout field away from its default, with the stride-4 mask
+# feature reading the stride-4 stage
+LAYOUT = dataclasses.replace(TINY, stem=16, stem_mid=8, s4_depth=1, expansion=2,
+                             global_ctx=True, seg=True, mask_stride=4)
 
 
 @pytest.mark.parametrize(
     "cfg",
-    [TINY, SEG_KPT, dataclasses.replace(SEG_KPT, aux_arm="tower")],
-    ids=["tiny", "tiny-seg-kpt", "tiny-seg-kpt-tower"],
+    [TINY, SEG_KPT, dataclasses.replace(SEG_KPT, aux_arm="tower"), LAYOUT],
+    ids=["tiny", "tiny-seg-kpt", "tiny-seg-kpt-tower", "tiny-layout"],
 )
 def test_fuse_parity_and_contract(cfg) -> None:
     err, scale, inv = check_parity(Detector(cfg, 4), 128)
@@ -50,7 +54,7 @@ def test_tier_fuse_parity_and_contract(tier: str) -> None:
 
 def test_deploy_parameter_counts() -> None:
     """The locked range: deploy (fused) parameters per tier."""
-    want = {"n": 4.75, "s": 11.93, "m": 41.35, "l": 81.27}
+    want = {"n": 5.18, "s": 11.93, "m": 32.40, "l": 81.27}
     for tier, millions in want.items():
         m = Detector(TIERS[tier], 80).fuse()
         params = sum(p.numel() for p in m.parameters())
@@ -164,3 +168,21 @@ def test_load_pretrained_reinitialises_only_the_classifier() -> None:
     assert torch.equal(target.head.box[0].weight, base.head.box[0].weight)
     with pytest.raises(AssertionError, match="does not fit"):
         load_pretrained(Detector(dataclasses.replace(TINY, neck=(16, 16, 32)), 3), base.state_dict())
+
+
+def test_global_context_starts_as_the_plain_pyramid_and_sees_the_whole_map() -> None:
+    """Loaded from a plain SPPF, the global-context variant computes the same
+    function (its last projection starts at zero); trained away from zero,
+    one corner of the map moves the opposite corner, which the 13-wide plain
+    pyramid cannot reach on a 32 x 32 map."""
+    torch.manual_seed(0)
+    plain, ctx = SPPFAdd(16).eval(), SPPFAdd(16, global_ctx=True).eval()
+    assert ctx.load_state_dict(plain.state_dict(), strict=False).unexpected_keys == []
+    x = torch.rand(1, 16, 32, 32)
+    with torch.no_grad():
+        assert torch.equal(plain(x), ctx(x))
+        torch.nn.init.ones_(ctx.ctx_out.weight)
+        y = x.clone()
+        y[..., 0, 0] += 10.0
+        assert not torch.equal(ctx(x)[..., -1, -1], ctx(y)[..., -1, -1])
+        assert torch.equal(plain(x)[..., -1, -1], plain(y)[..., -1, -1])
