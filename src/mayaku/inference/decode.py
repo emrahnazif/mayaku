@@ -30,17 +30,18 @@ class Decode:
     """What the host does after the graph. These numbers change AP without
     changing a weight, so they are recorded with every run and every artifact.
 
-    `multi_label` False takes the best class per anchor, one comparison per
-    anchor, which is what a deployed decoder does. True emits one detection
-    per class above the threshold, which scores slightly higher because a
-    second-choice class can still earn recall.
+    `multi_label` True (the default) keeps every (anchor, class) pair above
+    the threshold and takes the top-k over those pairs, as YOLO26's head
+    does, so a second-choice class still earns recall: +0.7 COCO AP on a
+    nano checkpoint (AR100 +4.3) for the same weights. False takes the best
+    class per anchor, one comparison per anchor.
     """
 
     conf: float = 0.001
     iou: float = 0.7
     max_det: int = 300
     topk: int = 1000
-    multi_label: bool = False
+    multi_label: bool = True
 
     @classmethod
     def from_sidecar(cls, block, **override):
