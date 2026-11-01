@@ -114,6 +114,10 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
             # keypoints; a model with a different K needs its own, the same
             # table the loss uses
             e.params.kpt_oks_sigmas = kptlib.sigmas(k).numpy()
+            # only the categories that carry keypoints are scored: in a
+            # multi-class file the others have no keypoint fields at all
+            e.params.catIds = [c["id"] for c in gt.dataset["categories"]
+                               if len(c.get("keypoints", ())) == k] or e.params.catIds
         e.evaluate()
         e.accumulate()
         e.summarize()

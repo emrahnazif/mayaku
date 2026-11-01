@@ -113,6 +113,31 @@ def test_evaluate_with_masks_and_keypoints(tmp_path, canvas) -> None:
     assert "segm_AP" in out and "kpt_AP" in out
 
 
+def test_keypoint_ap_scores_only_categories_with_keypoints(tmp_path) -> None:
+    """A multi-class file (COCO's 80 classes with person keypoints): the
+    classes without keypoint fields are left out of keypoint AP instead of
+    crashing pycocotools, and exact keypoints score 1."""
+    import json
+
+    anns, res = [], []
+    for i in range(4):
+        x, y = 20.0 + 10 * i, 30.0
+        kp = [x + 5, y + 5, 2, x + 20, y + 30, 2, x + 35, y + 55, 2]
+        anns += [{"id": 2 * i + 1, "image_id": i, "category_id": 1, "bbox": [x, y, 40, 60],
+                  "area": 2400.0, "iscrowd": 0, "keypoints": kp, "num_keypoints": 3},
+                 {"id": 2 * i + 2, "image_id": i, "category_id": 2, "bbox": [150, 150, 30, 30],
+                  "area": 900.0, "iscrowd": 0}]
+        res += [{"image_id": i, "category_id": 1, "keypoints": kp, "score": 1.0},
+                {"image_id": i, "category_id": 2, "keypoints": [160.0, 160.0, 1] * 3, "score": 0.9}]
+    path = tmp_path / "multi.json"
+    path.write_text(json.dumps({
+        "images": [{"id": i, "file_name": "%d.jpg" % i, "height": 240, "width": 320} for i in range(4)],
+        "annotations": anns,
+        "categories": [{"id": 1, "name": "person", "keypoints": ["a", "b", "c"]},
+                       {"id": 2, "name": "car"}]}))
+    assert coco_ap(str(path), res, "keypoints", k=3)["AP"] == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize("mask_stride", [8, 4])
 def test_mask_decode_is_chunk_invariant(monkeypatch, mask_stride) -> None:
     """Masks upsampled a few detections at a time, and RLE-encoded per chunk,
