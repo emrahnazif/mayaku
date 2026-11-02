@@ -12,9 +12,14 @@ Three detection terms:
                   distance, which is what lets the box branch express
                   uncertainty about an edge instead of guessing a number.
 
-Oriented boxes keep the three terms: the box term is 1 - ProbIoU (which
-also trains the angle), the distribution term's sides are measured along the
-box's own axes (`mayaku.model.obb`).
+Oriented boxes keep the three terms: the box term is 1 - ProbIoU, the
+distribution term's sides are measured along the box's own axes
+(`mayaku.model.obb`). ProbIoU sees a square as a round Gaussian and gives its
+angle no gradient, so the box term also carries sin^2(2 * angle error), zero
+at the true angle and a quarter turn off it (the same square), weighted by
+the target's squareness (short side / long side)^4. Elongated boxes keep
+ProbIoU alone: there a quarter turn is a wrong box, and an unweighted term
+would pull early, random angles towards it.
 
 The loss reads the training graph. Nothing here exists at deploy: the
 sigmoid, the softmax expectation and the decode run on the host.
@@ -224,7 +229,8 @@ class DetectionLoss(nn.Module):
                  warmup=5, box_gain=7.5, cls_gain=0.5, dfl_gain=1.5,
                  atss_soft=False, tal_beta=6.0, loc_weight_floor=0.0,
                  seg=False, seg_gain=2.0, seg_cap=250, kpt=0,
-                 kpt_gains=(12.0, 1.0, 1.0, 1.0), kpt_gain=1.0, obb=False):
+                 kpt_gains=(12.0, 1.0, 1.0, 1.0), kpt_gain=1.0, obb=False,
+                 obb_angle_gain=1.0):
         super().__init__()
         assert cls_loss in ("bce", "vfl"), cls_loss
         self.nc, self.reg_max = nc, reg_max
@@ -239,7 +245,7 @@ class DetectionLoss(nn.Module):
         self.kpt = KeypointLoss(kpt) if kpt else None
         self.k = kpt
         self.kpt_gains = tuple(kpt_gain * g for g in kpt_gains)
-        self.obb = obb
+        self.obb, self.obb_angle_gain = obb, obb_angle_gain
 
     def forward(self, preds, targets, epoch=0, masks=None):
         """preds: the model's tensors, head first. targets: (n, 6 + E) rows of
@@ -293,12 +299,18 @@ class DetectionLoss(nn.Module):
                 weight = weight.clamp(min=self.loc_weight_floor)
             pos_boxes = tgt_boxes[bi, ni]
             if self.obb:
-                iou = obblib.probiou(pd_boxes[bi, ni].float(), pos_boxes)[..., None]
+                pb = pd_boxes[bi, ni].float()
+                iou = obblib.probiou(pb, pos_boxes)[..., None]
+                lo, hi = pos_boxes[:, 2:4].aminmax(dim=1)
+                square = (lo / hi.clamp(min=1e-6)) ** 4
+                turn = square * torch.sin(2 * (pb[:, 4] - pos_boxes[:, 4])).pow(2)
+                miss = 1 - iou + self.obb_angle_gain * turn[..., None]
                 tgt_ltrb = obblib.encode(pos_boxes, points[ni], stride[ni], self.reg_max)
             else:
                 iou = boxlib.iou_xyxy(pd_boxes[bi, ni], pos_boxes, ciou=True)[..., None]
+                miss = 1 - iou
                 tgt_ltrb = boxlib.xyxy_to_ltrb(pos_boxes, points[ni], stride[ni], self.reg_max)
-            box = ((1 - iou) * weight).sum() / norm
+            box = (miss * weight).sum() / norm
             dfl = (dfl_loss(pd_dist[bi, ni].view(-1, 4, self.reg_max),
                             tgt_ltrb, self.reg_max) * weight).sum() / norm
         else:
