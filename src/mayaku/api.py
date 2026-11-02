@@ -371,6 +371,9 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
                                  aug=cfg.train.aug, seed=cfg.train.seed, coco=job.coco, **labels)
         val_ds = CocoDetection(str(job.val[1]), str(job.val[0]), canvas, **labels) \
             if job.val and main else None
+    # the layers the checkpoint does not fill (a fine-tune's classifier) start
+    # from the seed too, so a run is repeated by repeating its seed
+    torch.manual_seed(cfg.train.seed)
     model = cfg.model.build(canvas)
     if job.pretrained is not None and cfg.model.task == "classify":
         # the backbone, and the head when it fits
