@@ -132,9 +132,14 @@ def test_mask_branch_learns() -> None:
         a = cls[0, :, c].argmax()
         lg = masklib.assemble(grp["mask"][0], ker[a][None], points[a][None],
                               stride[a][None], boxes[0, a][None], s)[0]
-        m = torch.isfinite(lg) & (lg > 0)
-        gt = masklib.coverage(inst, torch.zeros(1, dtype=torch.long), torch.tensor([c + 1]),
-                              s).view(lg.shape) >= 0.5
+        cov = masklib.coverage(inst, torch.zeros(1, dtype=torch.long), torch.tensor([c + 1]),
+                               s).view(lg.shape)
+        # a cell the object covers exactly half of is trained towards p = 0.5,
+        # a logit on zero whose sign is chance (the 40 px object at 20..60 has a
+        # whole ring of them at stride 8), so only the cells with an answer count
+        known = (cov - 0.5).abs() > 1e-6
+        m = torch.isfinite(lg) & (lg > 0) & known
+        gt = (cov > 0.5) & known
         assert ((m & gt).sum() / (m | gt).sum().clamp(min=1)).item() > 0.5, c
 
 
