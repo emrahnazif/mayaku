@@ -138,7 +138,8 @@ def split_outputs(preds, seg=False, kpt=0, obb=False):
 # the angle readout are detachable, so their keys (`aux.`, `head.ang`) may
 # exist on either side alone; a model trained quantization-aware carries
 # activation observers (`.act_fq.`) a plain one lacks; and the classifier
-# (`head.cls.`) depends on the class count.
+# (`head.cls.`) depends on the class count. Auxiliary weights of another
+# shape (a checkpoint built with another `aux_arm` or width) start fresh too.
 AUX_KEY, QAT_KEY, CLASS_KEY, ANG_KEY = "aux.", ".act_fq.", "head.cls.", "head.ang"
 
 
@@ -148,7 +149,8 @@ def _load(model, state, optional, reinit_classes):
     are left at their initialisation instead of failing."""
     own = model.state_dict()
     shaped = [k for k, v in state.items() if k in own and v.shape != own[k].shape]
-    reinit = [k for k in shaped if reinit_classes and k.startswith(CLASS_KEY)]
+    reinit = [k for k in shaped if k.startswith(AUX_KEY)
+              or (reinit_classes and k.startswith(CLASS_KEY))]
     wrong = [k for k in shaped if k not in reinit]
     assert not wrong, "state dict does not fit this model: %s" % wrong[:8]
     r = model.load_state_dict({k: v for k, v in state.items() if k not in reinit}, strict=False)
