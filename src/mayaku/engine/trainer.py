@@ -114,6 +114,7 @@ class Recipe:
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
     seg_gain: float = 2.0
     seg_cap: int = 250
+    kpt_gain: float = 1.0           # scales every keypoint term
     seed: int = 0
     amp: bool = True
     # Multi-GPU (CUDA) only: BatchNorm statistics over the whole batch rather
@@ -434,7 +435,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                              atss_soft=r.atss_soft, tal_beta=r.tal_beta,
                              loc_weight_floor=r.loc_weight_floor,
                              seg=model.cfg.seg, seg_gain=r.seg_gain, seg_cap=r.seg_cap,
-                             kpt=model.cfg.kpt, obb=model.cfg.obb).to(device)
+                             kpt=model.cfg.kpt, kpt_gain=r.kpt_gain,
+                             obb=model.cfg.obb).to(device)
     # Built from the plain model before any SyncBatchNorm swap, so the shadow
     # (which rank 0 recalibrates and evaluates alone) never needs its peers.
     ema = EMA(model, r.ema_decay, r.ema_tau) if main else None

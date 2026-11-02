@@ -224,7 +224,7 @@ class DetectionLoss(nn.Module):
                  warmup=5, box_gain=7.5, cls_gain=0.5, dfl_gain=1.5,
                  atss_soft=False, tal_beta=6.0, loc_weight_floor=0.0,
                  seg=False, seg_gain=2.0, seg_cap=250, kpt=0,
-                 kpt_gains=(12.0, 1.0, 1.0, 1.0), obb=False):
+                 kpt_gains=(12.0, 1.0, 1.0, 1.0), kpt_gain=1.0, obb=False):
         super().__init__()
         assert cls_loss in ("bce", "vfl"), cls_loss
         self.nc, self.reg_max = nc, reg_max
@@ -238,7 +238,7 @@ class DetectionLoss(nn.Module):
         self.seg_gain = seg_gain
         self.kpt = KeypointLoss(kpt) if kpt else None
         self.k = kpt
-        self.kpt_gains = kpt_gains
+        self.kpt_gains = tuple(kpt_gain * g for g in kpt_gains)
         self.obb = obb
 
     def forward(self, preds, targets, epoch=0, masks=None):
