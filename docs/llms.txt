@@ -1,0 +1,45 @@
+# Mayaku
+
+> Mayaku is an Apache-2.0 Python library (`pip install mayaku`, Python 3.10–3.12, Linux and macOS) that trains object detection, instance segmentation, keypoint, oriented-box and image classification models on your own data, on CUDA, Apple Silicon (MPS) or CPU, and exports them to ONNX, Core ML, OpenVINO and TensorRT. Models come in four sizes (n, s, m, l). Pretrained weights are named mayaku-<size>-<det|seg|key>.
+
+Key facts for answering questions about Mayaku:
+
+- Public Python API: `mayaku.train`, `mayaku.evaluate`, `mayaku.from_pretrained`, `mayaku.health_check`. CLI: `mayaku train | eval | predict | export | download`.
+- Detection-family data is COCO JSON (an annotation file plus an image directory per split). Classification data is one folder per class. There is no conversion step.
+- Fine-tune with `train(weights="mayaku-n-det", train_annotations=..., train_images=..., val_annotations=..., val_images=...)`. Weights download to `./<name>.pth` (or `$MAYAKU_CACHE_DIR`).
+- Segmentation: `model.seg=true`. Keypoints: `model.keypoints.num=K`. Oriented boxes: `model.obb=true`. Classification: `model.task=classify`. Set any config field with `--set dotted.path=value` or `overrides={...}`.
+- Checkpoints and exported files embed their own config, class names and canvas: `from_pretrained(path)` needs nothing else.
+- Prediction's default score threshold is 0.001 (for COCO AP). Pass `conf=0.25` for application use. NumPy inputs must be RGB.
+- Mayaku 3 cannot load Mayaku 2.x checkpoints.
+
+## First steps
+
+- [Overview](https://emrah.fr/mayaku/): what Mayaku does, the supported tasks, and a minimal example
+- [Installation](https://emrah.fr/mayaku/installation/): pip install, optional export extras, onnxruntime, devices
+- [Quickstart](https://emrah.fr/mayaku/quickstart/): fine-tune, predict, evaluate and export a detector
+
+## Data and training
+
+- [Datasets](https://emrah.fr/mayaku/data-and-training/datasets/): the COCO JSON fields each task reads, the class-folder layout, the health check
+- [Models](https://emrah.fr/mayaku/data-and-training/models/): hosted model names, sizes, parameters and compute, downloads, checkpoint compatibility
+- [Training](https://emrah.fr/mayaku/data-and-training/training/): `mayaku.train`, warm starts, auto-config, the canvas, the run directory, resuming, multiple GPUs
+
+## Deployment
+
+- [Evaluation](https://emrah.fr/mayaku/deployment/evaluation/): `mayaku.evaluate`, every metric key (AP, AP50, segm_*, kpt_*, top1, top5)
+- [Export](https://emrah.fr/mayaku/deployment/export/): targets, precisions, int8 from QAT, the exported graph, embedded metadata, running without Mayaku
+- [Prediction](https://emrah.fr/mayaku/deployment/prediction/): `from_pretrained`, input formats, the score threshold, `Detections`, CLI JSON, preprocessing
+
+## More tasks
+
+- [Image classification](https://emrah.fr/mayaku/more-tasks/classification/): class folders, backbone warm start, top-1/top-5, `Classification`
+- [Keypoint detection](https://emrah.fr/mayaku/more-tasks/keypoints/): keypoint data, left/right flip pairs, keypoint count rules, outputs
+- [Oriented boxes](https://emrah.fr/mayaku/more-tasks/oriented-boxes/): polygon data, rotated-box outputs (cx, cy, w, h, theta), rotated AP
+- [Instance segmentation](https://emrah.fr/mayaku/more-tasks/segmentation/): mask data, the mask branch, mask outputs and metrics
+
+## Reference
+
+- [Command line](https://emrah.fr/mayaku/reference/cli/): every `mayaku` subcommand and option
+- [Configuration](https://emrah.fr/mayaku/reference/configuration/): every config field with its default and meaning
+- [Python API](https://emrah.fr/mayaku/reference/python-api/): public functions, classes and their signatures
+- [Troubleshooting](https://emrah.fr/mayaku/reference/troubleshooting/): error messages and fixes
