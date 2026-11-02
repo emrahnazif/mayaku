@@ -4,6 +4,7 @@ contract, the output layout is stable, and the aux branch is detachable."""
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import pytest
 import torch
@@ -18,8 +19,8 @@ from mayaku.model import (
     load_pretrained,
     load_weights,
 )
-from mayaku.model.blocks import SPPFAdd, as_canvas
-from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx
+from mayaku.model.blocks import SPPFAdd, as_canvas, conv_bn_pairs, rescale_to_init
+from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx, randomize_bn
 from mayaku.model.quant import qdq_export
 
 onnx = pytest.importorskip("onnx")
@@ -186,3 +187,49 @@ def test_global_context_starts_as_the_plain_pyramid_and_sees_the_whole_map() -> 
         y[..., 0, 0] += 10.0
         assert not torch.equal(ctx(x)[..., -1, -1], ctx(y)[..., -1, -1])
         assert torch.equal(plain(x)[..., -1, -1], plain(y)[..., -1, -1])
+
+
+def _init_norm(conv):
+    """The weight norm of PyTorch's default conv init (`rescale_to_init`)."""
+    return math.sqrt(conv.weight.shape[0] / 3)
+
+
+def _shrunk(cfg):
+    """A model as a long run with weight decay leaves it: non-trivial BN
+    statistics and BN-fed convs a few times under their initial norm."""
+    torch.manual_seed(0)
+    model = Detector(cfg, 4).eval()
+    randomize_bn(model)
+    with torch.no_grad():
+        for conv, _ in conv_bn_pairs(model):
+            conv.weight.mul_(0.3)
+    return model
+
+
+def test_rescale_to_init_keeps_the_output_and_restores_the_norm() -> None:
+    model = _shrunk(SEG_KPT)
+    x = torch.rand(2, 3, 128, 128)
+    with torch.no_grad():
+        before = model(x)
+    n = rescale_to_init(model)
+    assert n == len(list(conv_bn_pairs(model))) > 0
+    with torch.no_grad():
+        after = model(x)
+    for a, b in zip(before, after, strict=True):
+        torch.testing.assert_close(b, a, rtol=1e-4, atol=1e-4)
+    for conv, _ in conv_bn_pairs(model):
+        assert conv.weight.norm().item() == pytest.approx(_init_norm(conv), rel=1e-4)
+
+
+def test_rescale_to_init_only_lifts() -> None:
+    model = _shrunk(TINY)
+    norms = [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)]
+    assert rescale_to_init(model, 0.0) == 0
+    assert [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)] == norms
+    rescale_to_init(model, 2.0)
+    lifted = [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)]
+    # a lower floor leaves weights already above it alone
+    assert rescale_to_init(model, 1.0) == 0
+    assert [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)] == lifted
+    for (conv, _), n in zip(conv_bn_pairs(model), lifted, strict=True):
+        assert n == pytest.approx(2 * _init_norm(conv), rel=1e-4)

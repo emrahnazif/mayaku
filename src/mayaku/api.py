@@ -51,6 +51,7 @@ from mayaku.engine.trainer import load_state
 from mayaku.engine.trainer import train as run
 from mayaku.inference import from_pretrained
 from mayaku.model import load_pretrained
+from mayaku.model.blocks import rescale_to_init
 from mayaku.model.classify import load_backbone
 from mayaku.tuning import apply_auto_config, collect_set_paths
 from mayaku.utils.checkpoint import (
@@ -377,6 +378,10 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
         info = load_pretrained(model, job.pretrained)
         if info["reinitialised"]:
             log(f"[mayaku.train] classifier re-initialised for {model.nc} classes")
+    if job.pretrained is not None and cfg.train.rescale_pretrained:
+        n = rescale_to_init(model, cfg.train.rescale_pretrained)
+        log(f"[mayaku.train] {n} pretrained convs lifted to {cfg.train.rescale_pretrained:g}x "
+            "their initial weight norm")
     run(model, train_ds, val_ds, cfg.train, device=local_device(job.device_kind),
         out=str(job.train_dir), workers=cfg.dataloader.num_workers, log=log,
         sidecar=build_sidecar(cfg, job.coco.class_names, model) if main else None,

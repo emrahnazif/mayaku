@@ -20,6 +20,8 @@ Deploy op set, and nothing else ever appears:
 """
 
 import copy
+import itertools
+import math
 
 import torch
 import torch.nn as nn
@@ -127,6 +129,57 @@ def fuse_bn_chain(seq):
 # --------------------------------------------------------------------------
 # blocks
 # --------------------------------------------------------------------------
+
+
+def conv_bn_pairs(module):
+    """Every convolution whose output goes straight into a BatchNorm, as
+    (conv, bn): the `ConvBN` blocks and the conv-BN steps of a Sequential.
+    A conv that shares its BN with other branches (RepConv3x3's bare 1x1) is
+    not one: its scale is not the BN's to cancel."""
+    for m in module.modules():
+        if isinstance(m, ConvBN):
+            yield m.conv, m.bn
+        elif isinstance(m, nn.Sequential):
+            for a, b in itertools.pairwise(m):
+                if isinstance(a, nn.Conv2d) and a.bias is None and isinstance(b, nn.BatchNorm2d):
+                    yield a, b
+
+
+@torch.no_grad()
+def rescale_to_init(module, floor=1.0):
+    """Lift every conv that feeds a BatchNorm to at least `floor` times the
+    weight norm it had at initialisation, without changing what the network
+    computes.
+
+    BN cancels the scale of its input, so weight decay shrinks these weights
+    through a long run with nothing pushing back; at the end of a 50-epoch
+    pretraining they are a few times smaller than at the start. SGD's step
+    relative to such a weight goes as lr / |w|^2, so a fine-tune from them at
+    the usual learning rate takes steps several times too large and spends its
+    first epoch undoing the pretrained features (COCO epoch-0 box AP 12.2 from
+    the O365 n epoch-49 weights, 21.8 rescaled, 20.3 from epoch 10). Weights
+    already above the floor are left as they are.
+
+    The conv is scaled by c, its BN's running mean by c and variance by c^2,
+    and the BN gain by sqrt(var' + eps) / (c * sqrt(var + eps)), which keeps
+    the eval output exact despite the fixed eps. The initial norm is that of
+    PyTorch's default conv init (uniform, std 1 / sqrt(3 * fan_in)):
+    sqrt(c_out / 3). `floor` 0 changes nothing. Returns the number of convs
+    rescaled."""
+    n = 0
+    for conv, bn in conv_bn_pairs(module):
+        norm = conv.weight.float().norm()
+        target = floor * math.sqrt(conv.weight.shape[0] / 3)
+        if norm == 0 or norm >= target or not bn.track_running_stats:
+            continue
+        c = target / norm
+        old = (bn.running_var + bn.eps).sqrt()
+        conv.weight.mul_(c)
+        bn.running_mean.mul_(c)
+        bn.running_var.mul_(c * c)
+        bn.weight.mul_((bn.running_var + bn.eps).sqrt() / (c * old))
+        n += 1
+    return n
 
 
 class ConvBN(Fusible):

@@ -115,6 +115,10 @@ class Recipe:
     seg_gain: float = 2.0
     seg_cap: int = 250
     kpt_gain: float = 1.0           # scales every keypoint term
+    # warm start: lift the pretrained convs that feed a BatchNorm to at least
+    # this multiple of their initial weight norm, output unchanged
+    # (`mayaku.model.blocks.rescale_to_init`); 0 loads them as they are
+    rescale_pretrained: float = 1.5
     # oriented boxes: weight of the angle term, sin^2(2 * angle error)
     obb_angle_gain: float = 1.0
     seed: int = 0
