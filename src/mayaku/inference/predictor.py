@@ -15,7 +15,7 @@ from mayaku.inference.runner import Runner
 from mayaku.utils.checkpoint import read_deploy_checkpoint
 
 if TYPE_CHECKING:
-    from mayaku.model import Detector
+    from mayaku.model import Model
 
 __all__ = ["Predictor", "from_pretrained"]
 
@@ -25,7 +25,7 @@ class Predictor(Runner):
     with its sidecar: architecture, canvas, classes and decode all come from
     the checkpoint."""
 
-    def __init__(self, model: Detector, sidecar: Mapping[str, Any], device: str = "auto"):
+    def __init__(self, model: Model, sidecar: Mapping[str, Any], device: str = "auto"):
         super().__init__(sidecar, "Predictor")
         self.device = torch.device(Device.resolve(device))
         self.model = model.for_deploy().to(self.device)

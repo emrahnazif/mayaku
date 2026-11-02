@@ -355,6 +355,8 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
     if not main:
         log = _quiet
     canvas = cfg.input.canvas
+    train_ds: FolderDataset | CocoDetection
+    val_ds: FolderDataset | CocoDetection | None
     if cfg.model.task == "classify":
         train_ds = FolderDataset(str(job.train_images), canvas, aug=cfg.train.aug,
                                  seed=cfg.train.seed, labels=job.coco)
@@ -399,7 +401,7 @@ def _classifier_config(cfg: MayakuConfig, data: FolderLabels,
         raise ValueError(f"model.num_classes is {cfg.model.num_classes} and {data.root} "
                          f"has {nc} class folders")
     side = cfg.input.size_budget if "input.size_budget" in user_set_paths else CLASSIFY_SIZE
-    ov = {"model": {"num_classes": nc, "seg": False, "keypoints": None, "obb": False},
+    ov: dict[str, dict[str, Any]] = {"model": {"num_classes": nc, "seg": False, "keypoints": None, "obb": False},
           "input": {"size_budget": side, "canvas_hw": cfg.input.canvas_hw or (side, side)}}
     new = merge_overrides(cfg, ov)
     before, after = cfg.model_dump(mode="json"), new.model_dump(mode="json")

@@ -25,7 +25,7 @@ import torch
 
 if TYPE_CHECKING:
     from mayaku.config import MayakuConfig
-    from mayaku.model import Detector
+    from mayaku.model import Model
 
 __all__ = [
     "SIDECAR_KEY",
@@ -50,7 +50,7 @@ SIDECAR_SCHEMA_VERSION = 2
 def build_sidecar(
     cfg: MayakuConfig,
     class_names: Sequence[str],
-    model: Detector,
+    model: Model,
     provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the sidecar for a trained `model` built from `cfg`.

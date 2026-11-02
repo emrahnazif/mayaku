@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 
-from mayaku.inference.decode import Detections, decode_sidecar
+from mayaku.inference.decode import Classification, Detections, decode_sidecar
 from mayaku.inference.preprocess import ImageInput, letterbox_batch
 from mayaku.utils.checkpoint import check_sidecar
 
@@ -33,11 +33,13 @@ class Runner:
     def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         raise NotImplementedError
 
-    def __call__(self, image: ImageInput, conf: float | None = None) -> Detections:
+    def __call__(self, image: ImageInput,
+                 conf: float | None = None) -> Detections | Classification:
         return self.batch([image], conf)[0]
 
     @torch.no_grad()
-    def batch(self, images: Sequence[ImageInput], conf: float | None = None) -> list[Detections]:
+    def batch(self, images: Sequence[ImageInput],
+              conf: float | None = None) -> list[Detections] | list[Classification]:
         """Several images in one pass. `conf` overrides the recorded score
         threshold."""
         x, metas = letterbox_batch(images, self.canvas)

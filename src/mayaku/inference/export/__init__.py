@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Protocol, cast
 
 import torch
 
@@ -104,7 +105,16 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
     return path
 
 
-def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -> Any:
+class Session(Protocol):
+    """What every target's runtime session offers (`open_session`)."""
+
+    input_hw: tuple[int, ...]
+    batch: int | None
+
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]: ...
+
+
+def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -> Session:
     """The runtime session for an artifact: called with a (B, 3, H, W) uint8
     RGB batch on the host (each runtime scales it to [0, 1] where it runs),
     returns the raw maps as tensors in the sidecar's output order, on the
@@ -112,7 +122,7 @@ def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -
     is the batch size it was traced at (None: any)."""
     t = TARGETS[target_from_suffix(path)]
     precision = sidecar["export"]["precision"]
-    return t.module.Session(Path(path), list(sidecar["outputs"]), precision, device)
+    return cast(Session, t.module.Session(Path(path), list(sidecar["outputs"]), precision, device))
 
 
 @torch.no_grad()
@@ -131,4 +141,4 @@ def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 
     err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())
               for r, g in zip(ref, got, strict=True))
     norm = sum(float((r.double() ** 2).sum()) for r in ref)
-    return (err / max(norm, 1e-12)) ** 0.5
+    return math.sqrt(err / max(norm, 1e-12))

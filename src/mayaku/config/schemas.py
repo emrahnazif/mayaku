@@ -18,7 +18,7 @@ All models are frozen and reject unknown fields; derive a variant with
 from __future__ import annotations
 
 import dataclasses
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,6 +26,9 @@ from mayaku.engine.trainer import Recipe
 from mayaku.model import Detector, enable_qat
 from mayaku.model.blocks import as_canvas
 from mayaku.model.tiers import TIERS, Tier
+
+if TYPE_CHECKING:
+    from mayaku.model import Model
 
 __all__ = [
     "AutoConfig",
@@ -117,13 +120,15 @@ class ModelConfig(_BaseModel):
                                    aux_arm=self.aux_arm, mask_stride=self.mask_stride,
                                    obb=self.obb)
 
-    def build(self, canvas: int | tuple[int, int], num_classes: int | None = None) -> Detector:
+    def build(self, canvas: int | tuple[int, int],
+              num_classes: int | None = None) -> Model:
         """The detector this config describes, quantization-aware when
         `qat`: QAT changes the graph (and the checkpoint's keys), so
         a model is built with it before training or loading weights."""
         nc = num_classes if num_classes is not None else self.num_classes
         if nc is None:
             raise ValueError("model.num_classes is unset; pass num_classes")
+        model: Model
         if self.task == "classify":
             from mayaku.model.classify import Classifier
 
