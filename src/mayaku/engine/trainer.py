@@ -310,16 +310,18 @@ def loss_text(totals, n):
                      for k in ("box", "cls", "dfl") if k in totals)
 
 
-def int8_gap(model, val_ds, n, **kw):
+def int8_gap(model, val_ds, n, f=None, **kw):
     """Float AP minus int8 AP of a QAT model on the first `n` val images:
     the same weights, BatchNorm and ranges, the int8 simulation off and on.
     Watches what the scored and exported number costs against the float
     network, so a range that collapses a level shows the epoch it happens.
-    (A classifier's top-1, likewise.)"""
+    (A classifier's top-1, likewise.) `f` is the float score when the
+    caller already has it for those images (`n` covers the whole split)."""
     key = primary(model)[0]
     q = evaluate(model, val_ds, limit=n, **kw)[key]
-    with fake_quant_disabled(model):
-        f = evaluate(model, val_ds, limit=n, **kw)[key]
+    if f is None:
+        with fake_quant_disabled(model):
+            f = evaluate(model, val_ds, limit=n, **kw)[key]
     return f - q
 
 
@@ -369,8 +371,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     without evaluation: nothing is scored and no `best.pt` is written, so
     `last.pt` is the run's result. Quantization-aware
     training is a property of the model: pass one that went through
-    `mayaku.model.enable_qat` and training, scoring and the saved ranges are
-    the int8 ones.
+    `mayaku.model.enable_qat` and training and the saved ranges are the
+    int8 ones; scoring is fp32, as the checkpoint deploys, with the int8
+    cost logged beside it (`int8_gap`).
 
     Every `log_every` iterations the running loss is printed with a rate and
     an estimate; that line is the only place the host waits on the device
@@ -554,10 +557,17 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         recalibrate(ema.model, train_ds, r.recalibrate_images,
                     device=device, workers=min(workers, 4))
         if val_ds is not None and ((epoch + 1) % eval_every == 0 or epoch == r.epochs - 1):
-            rec.update(evaluate(ema.model, val_ds, device=device,
-                                batch=r.batch, workers=workers, d=r.decode))
+            # scored as it deploys and is reported: the fp32 graph. Picking
+            # best.pt on the int8 simulation instead favoured epochs where int8
+            # beat float by chance (on a small split they swing +-2 AP apart),
+            # and their fp32 score came out up to 2 AP below the logged one.
+            with fake_quant_disabled(ema.model) if qat else contextlib.nullcontext():
+                rec.update(evaluate(ema.model, val_ds, device=device,
+                                    batch=r.batch, workers=workers, d=r.decode))
             if qat and r.int8_check_images > 0:
-                rec["int8_gap"] = int8_gap(ema.model, val_ds, r.int8_check_images, device=device,
+                whole = r.int8_check_images >= len(val_ds)     # the float score is in hand
+                rec["int8_gap"] = int8_gap(ema.model, val_ds, r.int8_check_images,
+                                           f=rec[key] if whole else None, device=device,
                                            batch=r.batch, workers=workers, d=r.decode)
             if rec[key] > best[key]:
                 best = {"epoch": epoch, **{k: rec[k] for k in stats}}
