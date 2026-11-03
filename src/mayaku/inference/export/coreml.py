@@ -13,15 +13,22 @@ the model), so a host hands Core ML the letterboxed pixels as they are and
 Core ML converts them where the model runs. A float tensor input made the host
 write three planar floats per pixel itself first: on an M4, 0.45 ms of a
 2.1 ms int8 pipeline for tier n at 640 (0.08 ms for an image input).
+
+For fp16 / fp32 the 1/255 is folded into the first conv's weights: an input
+scale is an op Core ML runs on the CPU ahead of the Neural Engine (0.3 ms of
+tier n at 640 on an M1 Max, about 1 ms at 800), and folded, the whole graph
+runs on the Neural Engine. int8 keeps the input scale: its first conv
+quantizes the scaled input with a trained range.
 """
 
 from __future__ import annotations
 
+import copy
 import platform
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -47,6 +54,11 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
 
     int8 = precision == "int8"
     x = torch.zeros(1, 3, *canvas)
+    # a float graph takes the 1/255 in its first conv: the input then needs no
+    # scaling op, which Core ML would run on the CPU ahead of the Neural Engine
+    scale = cast(float, PREPROCESS["scale"])
+    if not int8:
+        model, scale = _fold_input_scale(model, x, scale)
     # coremltools converts TorchScript; torch's deprecation of it and its note
     # on the list output say nothing actionable here
     with torch.no_grad(), deploy_mode(model, int8), warnings.catch_warnings():
@@ -56,13 +68,42 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
     if int8:
         _register_int8_converters()
     ml = ct.convert(
-        traced, inputs=[ct.ImageType(name="images", shape=tuple(x.shape), scale=PREPROCESS["scale"],
+        traced, inputs=[ct.ImageType(name="images", shape=tuple(x.shape),
+                                     scale=scale,
                                      color_layout=ct.colorlayout.RGB)],
         outputs=[ct.TensorType(name=n) for n in model.out_names], convert_to="mlprogram",
         compute_precision=ct.precision.FLOAT32 if precision == "fp32" else ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.macOS14 if int8 else ct.target.macOS13)
     ml.user_defined_metadata[SIDECAR_KEY] = sidecar_blob(dict(sidecar))
     ml.save(str(path))
+
+
+def _fold_input_scale(model: Detector, x: torch.Tensor, scale: float) -> tuple[Detector, float]:
+    """(model to trace, input scale still needed): a copy of `model` whose
+    first conv takes pixels in [0, 255], its weights times `scale` -- conv(W *
+    s, x) = conv(W, x * s), zero padding scaling alike, the bias unchanged --
+    and 1.0; or `model` and `scale` as they are when no zero-padded conv reads
+    the input directly."""
+    folded = copy.deepcopy(model)
+    first: list[torch.nn.Conv2d] = []
+
+    def hook(mod: torch.nn.Conv2d, inp: tuple[torch.Tensor, ...]) -> None:
+        if not first and inp[0] is x:
+            first.append(mod)
+
+    handles = [m.register_forward_pre_hook(hook) for m in folded.modules()
+               if isinstance(m, torch.nn.Conv2d)]
+    try:
+        with torch.no_grad(), deploy_mode(folded, False):
+            folded(x)
+    finally:
+        for h in handles:
+            h.remove()
+    if not first or first[0].padding_mode != "zeros":
+        return model, scale
+    with torch.no_grad():
+        first[0].weight.mul_(scale)
+    return folded, 1.0
 
 
 def _register_int8_converters() -> None:
