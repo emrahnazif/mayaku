@@ -64,7 +64,9 @@ class Recipe:
     epochs: int = 125
     # Images per optimizer micro-step across all GPUs: a run keeps its recipe
     # on any GPU count, each of `world` ranks taking `batch / world` of it.
-    batch: int = 16
+    # 8 fits every tier at an 800 canvas on a 12 GB GPU; gradients still
+    # accumulate to `lr_ref_batch`. Raise it on bigger or several GPUs.
+    batch: int = 8
     optimizer: str = "sgd"          # sgd | adamw | musgd
     lr: float = 0.01
     lr_final_frac: float = 0.01     # final LR as a fraction of `lr`
