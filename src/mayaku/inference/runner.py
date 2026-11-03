@@ -30,7 +30,12 @@ class Runner:
     def class_names(self) -> list[str]:
         return list(self.sidecar["class_names"])
 
-    def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+    def _prepare(self, images: Sequence[ImageInput]) -> tuple[Any, list[dict[str, Any]]]:
+        """Images -> what `_forward` takes, and their letterbox metas: by
+        default the (B, 3, H, W) uint8 RGB batch on the canvas."""
+        return letterbox_batch(images, self.canvas)
+
+    def _forward(self, x: Any) -> list[torch.Tensor]:
         raise NotImplementedError
 
     def __call__(self, image: ImageInput,
@@ -42,5 +47,5 @@ class Runner:
               conf: float | None = None) -> list[Detections] | list[Classification]:
         """Several images in one pass. `conf` overrides the recorded score
         threshold."""
-        x, metas = letterbox_batch(images, self.canvas)
+        x, metas = self._prepare(images)
         return decode_sidecar(self._forward(x), metas, self.sidecar, conf)

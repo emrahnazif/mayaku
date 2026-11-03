@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from mayaku.data.batch import batch_to
@@ -107,13 +108,22 @@ class Session:
                          else tuple(int(v) for v in t.multiArrayType.shape[-2:]))
         self.outputs = outputs
 
+    @property
+    def takes_rgb(self) -> bool:
+        """True: `run_rgb` takes interleaved (H, W, 3) RGB pixels directly."""
+        return bool(self._image)
+
     def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
         """An image-input model takes the 8-bit pixels as they are."""
         if self._image:
-            from PIL import Image
+            return self.run_rgb(x[0].permute(1, 2, 0).contiguous().numpy())
+        out = self._model.predict({"images": batch_to(x, "cpu").numpy()})
+        return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]
 
-            px = x[0].permute(1, 2, 0).contiguous().numpy()
-            out = self._model.predict({"images": Image.fromarray(px, "RGB")})
-        else:
-            out = self._model.predict({"images": batch_to(x, "cpu").numpy()})
+    def run_rgb(self, px: npt.NDArray[np.uint8]) -> list[torch.Tensor]:
+        """One (H, W, 3) uint8 RGB canvas, as an image input wants it, with no
+        planar copy on the way."""
+        from PIL import Image
+
+        out = self._model.predict({"images": Image.fromarray(px, "RGB")})
         return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]
