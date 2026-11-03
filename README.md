@@ -18,8 +18,8 @@ any runtime, including true int8 on NPUs.
   [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.3 AP**: ahead of RF-DETR nano
   (57.4, with 6× the parameters), YOLO26s (57.8) and YOLO26n (54.8).
 - **True int8.** The deploy graph uses only convolutions, ReLU, add, max-pool and nearest
-  resize, so it quantizes end to end: no layers left in floating point, no fp16 fallback.
-  Quantization-aware training is on by default, so int8 costs almost nothing.
+  resize, so it quantizes almost end to end: everything except the final output
+  projections runs in int8. Quantization-aware training is on by default.
 - **Runs and deploys everywhere.** No compiled extensions, no deformable convolutions, no
   attention. Parity-tested exports to ONNX, Core ML, OpenVINO and TensorRT.
 - **Detection and instance segmentation** with one API and one training loop.
@@ -84,9 +84,10 @@ The gain is largest on small objects, where nano detectors usually struggle:
 
 ![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_by_size.png)
 
-> **Protocol.** AP is COCO AP@[.50:.95], best checkpoint on each dataset's valid split,
-> averaged over all 100 datasets. Parameters are deploy (fused) counts as published by each
-> library. Every library trains at its own defaults.
+> **Protocol.** AP is COCO AP@[.50:.95] (pycocotools, `maxDets=100`) on each dataset's
+> validation split, at the best epoch on that split, averaged over all 100 datasets.
+> Parameters are deploy (fused) counts as published by each library. Every library trains
+> at its own defaults.
 
 ## Deployment
 
@@ -104,7 +105,7 @@ That one constraint is where the rest comes from:
   is cheap per unit of compute.
 - **Higher resolution at nano latency.** That headroom pays for an 800 px input, and
   resolution is what small objects need.
-- **True int8, on any accelerator.** Nothing in the graph needs floating point (below).
+- **True int8, on any accelerator.** The graph quantizes almost end to end (below).
 - **The whole graph on the NPU.** On Apple silicon every layer of the network runs on the
   Neural Engine (fp16); nothing falls back to the CPU or GPU halfway through.
 - **One graph for every runtime.** The same file computes the same thing on TensorRT,
@@ -118,7 +119,7 @@ default input size.
 
 ### True int8
 
-Because every layer is a plain convolution with ReLU, the whole network quantizes. On
+Because every layer is a plain convolution with ReLU, the network quantizes almost whole. On
 TensorRT, Mayaku compiles to int8 everywhere except the final output projections.
 Models train quantization-aware by default.
 
