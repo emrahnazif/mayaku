@@ -70,16 +70,15 @@ mayaku export onnx runs/mayaku-n-det/train/best.pt --output model.onnx
 
 RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, sports,
 wildlife...), each with its own classes, mostly a few hundred to a few thousand images.
-That is the setting a fine-tuned detector lives in, so it is the benchmark we lead with.
 Every model is fine-tuned with its library's own defaults for 100 epochs, and every
 checkpoint is scored by the same pycocotools evaluator on each dataset's validation split.
 
-| Model | Params | Mean AP | AP<sub>S</sub> | AP<sub>M</sub> | AP<sub>L</sub> | mayaku-n ahead on |
-|---|---:|---:|---:|---:|---:|---:|
-| **mayaku-n** | **5.2M** | **58.3** | **33.5** | **51.4** | 63.9 | |
-| YOLO26s | 9.5M | 57.8 | 32.3 | 50.9 | 63.5 | 69 / 100 |
-| RF-DETR nano | 30.5M | 57.4 | 29.6 | 49.5 | 65.6 | 60 / 100 |
-| YOLO26n | 2.4M | 54.8 | 28.3 | 47.7 | 60.8 | 91 / 100 |
+| Model | Params | Mean AP | AP<sub>S</sub> | AP<sub>M</sub> | AP<sub>L</sub> |
+|---|---:|---:|---:|---:|---:|
+| **mayaku-n** | **5.2M** | **58.3** | **33.5** | **51.4** | 63.9 |
+| YOLO26s | 9.5M | 57.8 | 32.3 | 50.9 | 63.5 |
+| RF-DETR nano | 30.5M | 57.4 | 29.6 | 49.5 | 65.6 |
+| YOLO26n | 2.4M | 54.8 | 28.3 | 47.7 | 60.8 |
 
 The gain is largest on small objects, where nano detectors usually struggle:
 
@@ -148,8 +147,7 @@ frames from `cv2.VideoCapture` go in as they are, with no conversion.
 | `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | finishing training |
 
 All are pretrained on Objects365; detection and segmentation read COCO JSON.
-`mayaku download --list` shows what is hosted. A segmentation model fine-tuned on boxes
-alone trains as a detector.
+`mayaku download --list` shows what is hosted. 
 
 ## License
 
