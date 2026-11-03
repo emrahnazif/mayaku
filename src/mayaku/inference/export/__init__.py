@@ -36,8 +36,8 @@ from typing import Any, Protocol, cast
 
 import torch
 
-from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import RUNTIME, SUFFIX_TO_TARGET, target_from_suffix
+from mayaku.inference.preprocess import Canvases, network_input
 from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
 from mayaku.utils.requirements import require
@@ -114,15 +114,16 @@ class Session(Protocol):
     input_hw: tuple[int, ...]
     batch: int | None
 
-    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]: ...
+    def __call__(self, x: Canvases) -> list[torch.Tensor]: ...
 
 
 def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -> Session:
-    """The runtime session for an artifact: called with a (B, 3, H, W) uint8
-    RGB batch on the host (each runtime scales it to [0, 1] where it runs),
-    returns the raw maps as tensors in the sidecar's output order, on the
-    device it ran on, possibly its own buffers until its next call. `batch`
-    is the batch size it was traced at (None: any)."""
+    """The runtime session for an artifact: called with BGR canvases on the
+    host (`mayaku.inference.preprocess`; each runtime turns them into the
+    graph's planar RGB in [0, 1] where it runs), returns
+    the raw maps as tensors in the sidecar's output order, on the device it
+    ran on, possibly its own buffers until its next call. `batch` is the
+    batch size it was traced at (None: any)."""
     target = target_from_suffix(path)
     require(RUNTIME[target])
     t = TARGETS[target]
@@ -138,10 +139,10 @@ def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 
     the compute it deploys on (`_PARITY_DEVICE`, else the CPU)."""
     target = sidecar["export"]["target"]
     session = open_session(path, sidecar, _PARITY_DEVICE.get(target, "cpu"))
-    px = torch.randint(0, 256, (1, 3, *sidecar["canvas_hw"]), dtype=torch.uint8,
-                       generator=torch.Generator().manual_seed(seed))
+    px = torch.randint(0, 256, (1, *sidecar["canvas_hw"], 3), dtype=torch.uint8,
+                       generator=torch.Generator().manual_seed(seed)).numpy()
     with deploy_mode(model, sidecar["export"]["precision"] == "int8"):
-        ref = model.eval()(batch_to(px, "cpu"))
+        ref = model.eval()(network_input(px, torch.device("cpu")))
     got = session(px)
     err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())
               for r, g in zip(ref, got, strict=True))

@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from mayaku.backends.device import Device
-from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import SUFFIX_TO_TARGET
+from mayaku.inference.preprocess import Canvases, network_input
 from mayaku.inference.runner import Runner
 from mayaku.utils.checkpoint import read_deploy_checkpoint
 
@@ -39,8 +39,8 @@ class Predictor(Runner):
         model.load_state_dict(state, strict=True)
         return cls(model, sidecar, device)
 
-    def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        return cast(list[torch.Tensor], self.model(batch_to(x, self.device)))
+    def _forward(self, x: Canvases) -> list[torch.Tensor]:
+        return cast(list[torch.Tensor], self.model(network_input(x, self.device)))
 
     def export(self, target: str = "onnx", output: str | Path | None = None,
                precision: str | None = None) -> Path:

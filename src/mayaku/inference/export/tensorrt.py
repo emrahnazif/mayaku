@@ -29,6 +29,7 @@ import torch
 
 from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_header
 from mayaku.inference.export.onnx import onnx_graph
+from mayaku.inference.preprocess import Canvases, planar_tensor
 from mayaku.model import Detector
 from mayaku.utils.requirements import require
 
@@ -106,10 +107,10 @@ def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
 
 class Session:
     """The engine on the current CUDA device, with torch tensors as its I/O
-    buffers. The maps stay on the GPU, so the decode runs there too and only
-    the final detections come back."""
-
-    batch = 1
+    buffers. The BGR canvases cross as bytes through a reused pinned buffer;
+    the planar RGB transpose, the 1/255 and the engine run as one CUDA graph.
+    The maps stay on the GPU, so the decode runs there too and only the final
+    detections come back."""
 
     def __init__(self, path: Path, outputs: list[str], precision: str, device: str = "auto"):
         import tensorrt as trt
@@ -123,10 +124,12 @@ class Session:
         self._input = torch.empty(tuple(self._engine.get_tensor_shape(name)),
                                   dtype=torch.float32, device=self._device)
         self._ctx.set_tensor_address(name, self._input.data_ptr())
-        # the pixels cross as bytes and are scaled on the GPU (a host uint8 ->
-        # device float copy would cast on the host and send floats)
-        self._pixels = torch.empty(self._input.shape, dtype=torch.uint8, device=self._device)
-        self.input_hw = tuple(self._input.shape[-2:])
+        b, _, h, w = self._input.shape
+        self.batch, self.input_hw = int(b), (int(h), int(w))
+        self._host = torch.empty((b, h, w, 3), dtype=torch.uint8).pin_memory()
+        self._pixels = torch.empty((b, h, w, 3), dtype=torch.uint8, device=self._device)
+        self._uploaded = torch.cuda.Event()      # recorded after each upload
+        self._pending = False
         self._out = {n: torch.empty(tuple(self._engine.get_tensor_shape(n)),
                                     dtype=torch.float32, device=self._device)
                      for n in outputs}
@@ -135,10 +138,16 @@ class Session:
         self.outputs = outputs
         self._graph: torch.cuda.CUDAGraph | None = None
 
-    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
-        # no sync after the first call: work on the maps is ordered after the
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        # the previous upload must have left the pinned buffer before it is
+        # refilled; no sync otherwise: work on the maps is ordered after the
         # engine on this stream
-        self._pixels.copy_(x)
+        if self._pending:
+            self._uploaded.synchronize()
+        self._host.numpy()[...] = x
+        self._pixels.copy_(self._host, non_blocking=True)
+        self._uploaded.record(torch.cuda.current_stream(self._device))
+        self._pending = True
         if self._graph is None:
             self._graph = self._capture()
         else:
@@ -146,14 +155,14 @@ class Session:
         return [self._out[n] for n in self.outputs]
 
     def _run(self) -> None:
-        torch.div(self._pixels, 255, out=self._input)
+        planar_tensor(self._pixels, out=self._input)
         self._ctx.execute_async_v3(torch.cuda.current_stream(self._device).cuda_stream)
 
     def _capture(self) -> torch.cuda.CUDAGraph:
         """Run once (TensorRT's lazy setup cannot be captured), then record the
-        scaling and the engine as one CUDA graph that later calls replay: one
-        launch instead of one per layer, which at small sizes is what bounds
-        the latency."""
+        input conversion and the engine as one CUDA graph that later calls
+        replay: one launch instead of one per layer, which at small sizes is
+        what bounds the latency."""
         self._run()
         torch.cuda.current_stream(self._device).synchronize()
         graph = torch.cuda.CUDAGraph()

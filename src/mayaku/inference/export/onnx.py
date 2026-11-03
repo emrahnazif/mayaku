@@ -13,8 +13,8 @@ from typing import Any
 
 import torch
 
-from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import embed_sidecar
+from mayaku.inference.preprocess import Canvases, planar
 from mayaku.model import Detector
 from mayaku.model.contract import export_onnx
 
@@ -58,6 +58,6 @@ class Session:
         # traced at a fixed batch size (1 unless exported otherwise)
         self.batch = inp.shape[0] if isinstance(inp.shape[0], int) else None
 
-    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
-        maps = self._sess.run(self.outputs, {self._input: batch_to(x, "cpu").numpy()})
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        maps = self._sess.run(self.outputs, {self._input: planar(x)})
         return [torch.from_numpy(m) for m in maps]

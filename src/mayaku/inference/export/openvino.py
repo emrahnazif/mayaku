@@ -14,9 +14,9 @@ from typing import Any
 
 import torch
 
-from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
 from mayaku.inference.export.onnx import onnx_graph
+from mayaku.inference.preprocess import Canvases, planar
 from mayaku.model import Detector
 
 PRECISIONS = ("fp32", "fp16", "int8")
@@ -51,6 +51,6 @@ class Session:
         self.input_hw = tuple(inp.get_shape())[-2:]
         self.batch = int(inp.get_shape()[0])
 
-    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
-        res = self._compiled([batch_to(x, "cpu").numpy()])
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        res = self._compiled([planar(x)])
         return [torch.from_numpy(res[p]) for p in self._ports]

@@ -8,11 +8,12 @@ It also runs on the Neural Engine, but on an M1 Max it is slower than fp16
 no faster int8 path, so the quantize steps are pure cost there. The sidecar
 sits in ``user_defined_metadata``, written before saving.
 
-The input is an image (RGB, 8 bits per channel; the 1/255 scaling happens in
-the model), so a host hands Core ML the letterboxed pixels as they are and
-Core ML converts them where the model runs. A float tensor input made the host
-write three planar floats per pixel itself first: on an M4, 0.45 ms of a
-2.1 ms int8 pipeline for tier n at 640 (0.08 ms for an image input).
+The input is an image (8 bits per channel; the 1/255 scaling happens in the
+model), so a host hands Core ML the letterboxed pixels as an image and Core ML
+converts them where the model runs: the mayaku runtime's BGR canvas, or an
+app's camera buffer. A float tensor input made the host write three planar
+floats per pixel itself first: on an M4, 0.45 ms of a 2.1 ms int8 pipeline for
+tier n at 640 (0.08 ms for an image input).
 
 For fp16 / fp32 the 1/255 is folded into the first conv's weights: an input
 scale is an op Core ML runs on the CPU ahead of the Neural Engine (0.3 ms of
@@ -31,12 +32,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
-from mayaku.data.batch import batch_to
 from mayaku.data.geometry import PREPROCESS
 from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
+from mayaku.inference.preprocess import Canvases, planar
 from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
 
@@ -149,22 +149,15 @@ class Session:
                          else tuple(int(v) for v in t.multiArrayType.shape[-2:]))
         self.outputs = outputs
 
-    @property
-    def takes_rgb(self) -> bool:
-        """True: `run_rgb` takes interleaved (H, W, 3) RGB pixels directly."""
-        return bool(self._image)
-
-    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
-        """An image-input model takes the 8-bit pixels as they are."""
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        """One BGR canvas (batch 1): read as an image from its BGR bytes for an
+        image-input model, else the planar floats."""
         if self._image:
-            return self.run_rgb(x[0].permute(1, 2, 0).contiguous().numpy())
-        out = self._model.predict({"images": batch_to(x, "cpu").numpy()})
-        return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]
+            from PIL import Image
 
-    def run_rgb(self, px: npt.NDArray[np.uint8]) -> list[torch.Tensor]:
-        """One (H, W, 3) uint8 RGB canvas, as an image input wants it, with no
-        planar copy on the way."""
-        from PIL import Image
-
-        out = self._model.predict({"images": Image.fromarray(px, "RGB")})
+            h, w = self.input_hw
+            px = Image.frombuffer("RGB", (w, h), np.ascontiguousarray(x[0]), "raw", "BGR", 0, 1)
+            out = self._model.predict({"images": px})
+        else:
+            out = self._model.predict({"images": planar(x)})
         return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]

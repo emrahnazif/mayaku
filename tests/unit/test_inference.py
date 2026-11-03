@@ -85,13 +85,17 @@ def test_predictor_matches_the_evaluation_path(run, predictor) -> None:
         assert tuple(g.masks.shape[1:]) == tuple(ds.shapes[i])
 
 
-def test_predictor_accepts_rgb_arrays(run, predictor) -> None:
+def test_predictor_takes_paths_bgr_arrays_and_pil_images_alike(run, predictor) -> None:
+    """One image three ways: a path, the BGR array `cv2.imread` gives, and a
+    PIL image (RGB by its type) -- the same detections."""
     import cv2
+    from PIL import Image
 
     files = run[2]
     a = predictor(files[0])
-    b = predictor(cv2.imread(files[0])[:, :, ::-1])
-    assert torch.equal(a.boxes, b.boxes) and torch.equal(a.labels, b.labels)
+    for other in (cv2.imread(files[0]), Image.open(files[0])):
+        b = predictor(other)
+        assert torch.equal(a.boxes, b.boxes) and torch.equal(a.labels, b.labels)
 
 
 def test_predictor_leaves_the_given_model_alone(run) -> None:
@@ -170,8 +174,8 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
     if target == "tensorrt":    # the first call records a CUDA graph, later calls replay it
         s = open_session(path, a.sidecar, "cuda")
-        px = torch.randint(0, 256, (2, 1, 3, *a.canvas), dtype=torch.uint8,
-                           generator=torch.Generator().manual_seed(0))
+        px = torch.randint(0, 256, (2, 1, *a.canvas, 3), dtype=torch.uint8,
+                           generator=torch.Generator().manual_seed(0)).numpy()
         first = [m.clone() for m in s(px[0])]
         other = [m.clone() for m in s(px[1])]
         again = s(px[0])

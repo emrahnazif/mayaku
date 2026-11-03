@@ -9,15 +9,16 @@ from typing import Any
 import torch
 
 from mayaku.inference.decode import Classification, Detections, decode_sidecar
-from mayaku.inference.preprocess import ImageInput, letterbox_batch
+from mayaku.inference.preprocess import Canvases, ImageInput, letterbox_batch
 from mayaku.utils.checkpoint import check_sidecar
 
 
 class Runner:
-    """Call with an image path or an (H, W, 3) RGB array and get `Detections`
-    in that image's pixels; `batch` takes several. A subclass supplies
-    `_forward`: a (B, 3, H, W) uint8 batch on the canvas -> the raw maps in
-    `sidecar["outputs"]` order."""
+    """Call with an image path, a PIL image or an (H, W, 3) BGR array (OpenCV's
+    order, as `cv2.imread` and `cv2.VideoCapture` give it) and get
+    `Detections` in that image's pixels; `batch` takes several. A subclass
+    supplies `_forward`: (B, H, W, 3) uint8 BGR canvases (`letterbox_batch`)
+    -> the raw maps in `sidecar["outputs"]` order."""
 
     def __init__(self, sidecar: Mapping[str, Any], source: str):
         self.sidecar = dict(check_sidecar(sidecar, source))
@@ -30,12 +31,7 @@ class Runner:
     def class_names(self) -> list[str]:
         return list(self.sidecar["class_names"])
 
-    def _prepare(self, images: Sequence[ImageInput]) -> tuple[Any, list[dict[str, Any]]]:
-        """Images -> what `_forward` takes, and their letterbox metas: by
-        default the (B, 3, H, W) uint8 RGB batch on the canvas."""
-        return letterbox_batch(images, self.canvas)
-
-    def _forward(self, x: Any) -> list[torch.Tensor]:
+    def _forward(self, x: Canvases) -> list[torch.Tensor]:
         raise NotImplementedError
 
     def __call__(self, image: ImageInput,
@@ -47,5 +43,5 @@ class Runner:
               conf: float | None = None) -> list[Detections] | list[Classification]:
         """Several images in one pass. `conf` overrides the recorded score
         threshold."""
-        x, metas = self._prepare(images)
+        x, metas = letterbox_batch(images, self.canvas)
         return decode_sidecar(self._forward(x), metas, self.sidecar, conf)

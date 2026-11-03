@@ -1,73 +1,87 @@
-"""Images in, letterboxed uint8 batches out: the preprocessing half of the
-input contract (`mayaku.data.geometry.PREPROCESS`), shared by the Predictor
-and the exported-artifact runner and pixel-identical to training's -- the same
-OpenCV decode, the same `letterbox`, the same `to_tensor`."""
+"""Images in, letterboxed canvases out: the one place an image enters
+inference, shared by the Predictor and every exported-artifact runtime.
+
+The pipeline is BGR, OpenCV's order, end to end: an image path is decoded with
+OpenCV as in training, a numpy array is taken to be BGR as `cv2.imread` and
+`cv2.VideoCapture` give it, and a PIL image (RGB by its type) is converted
+once. The letterbox is training's own (`mayaku.data.geometry.letterbox`), so
+the canvas holds the pixels training saw. The network itself reads planar RGB
+in [0, 1] (`mayaku.data.geometry.PREPROCESS`, recorded in every sidecar);
+each runtime makes that conversion where it is cheapest, with the channel
+reversal folded into the transpose it needs anyway: `planar` on the host,
+`planar_tensor` on a device.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 import cv2
 import numpy as np
 import numpy.typing as npt
 import torch
+from PIL import Image
 
-from mayaku.data.batch import to_tensor
 from mayaku.data.geometry import letterbox
 
-ImageInput = str | Path | npt.NDArray[Any]
+ImageInput: TypeAlias = str | Path | npt.NDArray[Any] | Image.Image
+#: (B, H, W, 3) uint8 BGR letterboxed canvases, what every runtime session takes
+Canvases: TypeAlias = npt.NDArray[np.uint8]
 
 
-def _imread(path: str | Path) -> npt.NDArray[Any]:
-    bgr = cv2.imread(str(path))
-    if bgr is None:
-        raise FileNotFoundError(f"cannot read image {path}")
-    return bgr
-
-
-def _rgb_uint8(image: ImageInput) -> npt.NDArray[Any]:
-    """An (H, W, 3) RGB array, checked, as uint8."""
+def read_bgr(image: ImageInput) -> npt.NDArray[np.uint8]:
+    """A path, a PIL image or an (H, W, 3) BGR array -> (H, W, 3) uint8 BGR."""
+    if isinstance(image, str | Path):
+        bgr = cv2.imread(str(image))          # IMREAD_COLOR: (H, W, 3) uint8 BGR
+        if bgr is None:
+            raise FileNotFoundError(f"cannot read image {image}")
+        return cast(npt.NDArray[np.uint8], bgr)
+    if isinstance(image, Image.Image):        # RGB by its type
+        rgb = np.asarray(image if image.mode == "RGB" else image.convert("RGB"))
+        return cast(npt.NDArray[np.uint8], cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     arr = np.asarray(image)
     if arr.ndim != 3 or arr.shape[-1] != 3:
-        raise ValueError(f"expected an (H, W, 3) RGB array or an image path; got shape {arr.shape}")
+        raise ValueError("expected an image path, a PIL image or an (H, W, 3) BGR array; "
+                         f"got an array of shape {arr.shape}")
     return arr if arr.dtype == np.uint8 else np.clip(arr, 0, 255).astype(np.uint8)
 
 
-def read_bgr(image: ImageInput) -> npt.NDArray[Any]:
-    """A path (decoded with OpenCV, as in training) or an (H, W, 3) RGB array
-    -> (H, W, 3) uint8 BGR, the layout training letterboxes."""
-    if isinstance(image, str | Path):
-        return _imread(image)
-    return np.ascontiguousarray(_rgb_uint8(image)[:, :, ::-1])
-
-
 def letterbox_batch(images: Sequence[ImageInput], canvas: tuple[int, int]
-                    ) -> tuple[torch.Tensor, list[dict[str, Any]]]:
-    """Images -> ((B, 3, H, W) uint8 RGB, letterbox metas {"ratio", "pad",
-    "shape"})."""
+                    ) -> tuple[Canvases, list[dict[str, Any]]]:
+    """Images -> (BGR canvases, letterbox metas {"ratio", "pad", "shape"})."""
     out, metas = [], []
     for image in images:
         bgr = read_bgr(image)
         img, r, pad = letterbox(bgr, canvas)
-        out.append(to_tensor(img))
+        out.append(img)
         metas.append({"ratio": r, "pad": pad, "shape": bgr.shape[:2]})
-    return (out[0][None] if len(out) == 1 else torch.stack(out)), metas
+    # one image, the common case, is a view: no copy into a batch array
+    return (out[0][None] if len(out) == 1 else np.stack(out)), metas
 
 
-def letterbox_rgb(image: ImageInput, canvas: tuple[int, int]
-                  ) -> tuple[npt.NDArray[Any], dict[str, Any]]:
-    """One image -> ((H, W, 3) uint8 RGB on the canvas, its letterbox meta),
-    for a runtime that takes interleaved RGB pixels (a Core ML image input).
-    The same pixels as `letterbox_batch`: resizing treats each channel alike
-    and the padding is the same grey in all three, so letterboxing the RGB
-    array directly skips the BGR copy and the planar round trip."""
-    if isinstance(image, str | Path):
-        src, bgr = _imread(image), True
-    else:
-        src, bgr = np.ascontiguousarray(_rgb_uint8(image)), False
-    img, r, pad = letterbox(src, canvas)
-    if bgr:      # converted on the canvas, not the (usually larger) source
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return img, {"ratio": r, "pad": pad, "shape": src.shape[:2]}
+def network_input(canvases: Canvases, device: torch.device) -> torch.Tensor:
+    """BGR canvases -> the network's planar RGB float input on `device`: on
+    the host in one pass (`planar`), or sent as bytes and converted where the
+    network runs (`planar_tensor`)."""
+    if device.type == "cpu":
+        return torch.from_numpy(planar(canvases))
+    return planar_tensor(torch.from_numpy(canvases).to(device, non_blocking=True))
+
+
+def planar(canvases: Canvases) -> npt.NDArray[np.float32]:
+    """BGR canvases -> the network's (B, 3, H, W) float32 RGB in [0, 1], in
+    one pass: the transpose and the channel reversal are a strided view the
+    division reads through."""
+    b, h, w, _ = canvases.shape
+    out = np.empty((b, 3, h, w), np.float32)
+    # divided, not multiplied by 1/255: bit-identical to training's `batch_to`
+    np.divide(canvases[..., ::-1].transpose(0, 3, 1, 2), np.float32(255), out=out)
+    return out
+
+
+def planar_tensor(px: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`planar` for a uint8 BGR canvas tensor already on its device, into
+    `out` when given (a TensorRT engine's input buffer)."""
+    return torch.div(px.permute(0, 3, 1, 2).flip(1), 255, out=out)

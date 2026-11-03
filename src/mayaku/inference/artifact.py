@@ -7,15 +7,13 @@ exactly as a deployment would.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
 
 import torch
 
 from mayaku.inference.export import open_session
 from mayaku.inference.export.metadata import read_sidecar, target_from_suffix
-from mayaku.inference.preprocess import ImageInput, letterbox_rgb
+from mayaku.inference.preprocess import Canvases
 from mayaku.inference.runner import Runner
 from mayaku.utils.checkpoint import check_sidecar
 
@@ -34,27 +32,13 @@ class ArtifactPredictor(Runner):
         if self._session.input_hw != self.canvas:
             raise ValueError(f"{path}: graph input {self._session.input_hw} disagrees with the "
                              f"sidecar canvas {self.canvas}")
-        self._rgb = bool(getattr(self._session, "takes_rgb", False))
 
-    def _prepare(self, images: Sequence[ImageInput]) -> tuple[Any, list[dict[str, Any]]]:
-        """A runtime that takes interleaved RGB pixels (a Core ML image input)
-        gets each letterboxed image as it is, skipping the planar batch the
-        other runtimes need."""
-        if not self._rgb:
-            return super()._prepare(images)
-        canvases, metas = zip(*(letterbox_rgb(image, self.canvas) for image in images), strict=True)
-        return list(canvases), list(metas)
-
-    def _forward(self, x: Any) -> list[torch.Tensor]:
-        """A planar batch, run in chunks of the session's batch size, or a list
-        of RGB canvases (`_prepare`), run one per call."""
-        if self._rgb:
-            run, parts = cast(Any, self._session).run_rgb, x
-        else:
-            step = self._session.batch or len(x)
-            run, parts = self._session, [x[i:i + step] for i in range(0, len(x), step)]
+    def _forward(self, x: Canvases) -> list[torch.Tensor]:
+        """BGR canvases, run in chunks of the session's batch size."""
+        step = self._session.batch or len(x)
+        parts = [x[i:i + step] for i in range(0, len(x), step)]
         if len(parts) == 1:
-            return cast(list[torch.Tensor], run(parts[0]))
+            return self._session(parts[0])
         # a session may hand back its own buffers, overwritten by the next run
-        runs = [[m.clone() for m in run(p)] for p in parts]
+        runs = [[m.clone() for m in self._session(p)] for p in parts]
         return [torch.cat(m) for m in zip(*runs, strict=True)]

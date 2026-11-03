@@ -14,9 +14,9 @@ import torch.nn.functional as F
 
 PAD = 114  # mid-grey padding
 
-# The input contract every runtime must reproduce, as recorded in each
-# checkpoint and artifact: letterbox onto the canvas (uniform scale, centred,
-# cv2 INTER_LINEAR resize, PAD fill), channels RGB, uint8 -> float by /255.
+# The network's input contract, as recorded in each checkpoint and artifact:
+# letterbox onto the canvas (uniform scale, centred, cv2 INTER_LINEAR resize,
+# PAD fill), planar RGB, uint8 -> float by /255.
 PREPROCESS = {"resize": "letterbox", "interpolation": "bilinear", "pad_value": PAD,
               "channels": "RGB", "scale": 1 / 255}
 
