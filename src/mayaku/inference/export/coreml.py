@@ -149,6 +149,9 @@ class Session:
                          else tuple(int(v) for v in t.multiArrayType.shape[-2:]))
         self.outputs = outputs
 
+    def canvases(self, n: int) -> Canvases | None:
+        return None        # the host conversion reads any array
+
     def __call__(self, x: Canvases) -> list[torch.Tensor]:
         """One BGR canvas (batch 1): read as an image from its BGR bytes for an
         image-input model, else the planar floats."""

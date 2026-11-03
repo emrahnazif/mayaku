@@ -51,6 +51,9 @@ class Session:
         self.input_hw = tuple(inp.get_shape())[-2:]
         self.batch = int(inp.get_shape()[0])
 
+    def canvases(self, n: int) -> Canvases | None:
+        return None        # the host conversion reads any array
+
     def __call__(self, x: Canvases) -> list[torch.Tensor]:
         res = self._compiled([planar(x)])
         return [torch.from_numpy(res[p]) for p in self._ports]

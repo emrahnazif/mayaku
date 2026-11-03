@@ -138,13 +138,20 @@ class Session:
         self.outputs = outputs
         self._graph: torch.cuda.CUDAGraph | None = None
 
+    def canvases(self, n: int) -> Canvases | None:
+        """The pinned upload buffer, once the last upload has left it; the
+        caller letterboxes into it and `__call__` sends it without a copy."""
+        if n > self.batch:
+            return None
+        self._wait()
+        return self._host.numpy()[:n]
+
     def __call__(self, x: Canvases) -> list[torch.Tensor]:
-        # the previous upload must have left the pinned buffer before it is
-        # refilled; no sync otherwise: work on the maps is ordered after the
+        # no sync after the upload: work on the maps is ordered after the
         # engine on this stream
-        if self._pending:
-            self._uploaded.synchronize()
-        self._host.numpy()[...] = x
+        if x.ctypes.data != self._host.data_ptr():
+            self._wait()
+            self._host.numpy()[:len(x)] = x
         self._pixels.copy_(self._host, non_blocking=True)
         self._uploaded.record(torch.cuda.current_stream(self._device))
         self._pending = True
@@ -153,6 +160,12 @@ class Session:
         else:
             self._graph.replay()
         return [self._out[n] for n in self.outputs]
+
+    def _wait(self) -> None:
+        """Until the last upload has left the pinned buffer."""
+        if self._pending:
+            self._uploaded.synchronize()
+            self._pending = False
 
     def _run(self) -> None:
         planar_tensor(self._pixels, out=self._input)

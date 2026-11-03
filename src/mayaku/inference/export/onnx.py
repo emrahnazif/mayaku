@@ -58,6 +58,9 @@ class Session:
         # traced at a fixed batch size (1 unless exported otherwise)
         self.batch = inp.shape[0] if isinstance(inp.shape[0], int) else None
 
+    def canvases(self, n: int) -> Canvases | None:
+        return None        # the host conversion reads any array
+
     def __call__(self, x: Canvases) -> list[torch.Tensor]:
         maps = self._sess.run(self.outputs, {self._input: planar(x)})
         return [torch.from_numpy(m) for m in maps]

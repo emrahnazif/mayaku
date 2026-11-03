@@ -34,6 +34,11 @@ class Runner:
     def _forward(self, x: Canvases) -> list[torch.Tensor]:
         raise NotImplementedError
 
+    def _canvases(self, n: int) -> Canvases | None:
+        """Where `n` images are letterboxed: a runtime's own input buffer, or
+        None for a new array."""
+        return None
+
     def __call__(self, image: ImageInput,
                  conf: float | None = None) -> Detections | Classification:
         return self.batch([image], conf)[0]
@@ -43,5 +48,5 @@ class Runner:
               conf: float | None = None) -> list[Detections] | list[Classification]:
         """Several images in one pass. `conf` overrides the recorded score
         threshold."""
-        x, metas = letterbox_batch(images, self.canvas)
+        x, metas = letterbox_batch(images, self.canvas, self._canvases(len(images)))
         return decode_sidecar(self._forward(x), metas, self.sidecar, conf)

@@ -33,6 +33,9 @@ class ArtifactPredictor(Runner):
             raise ValueError(f"{path}: graph input {self._session.input_hw} disagrees with the "
                              f"sidecar canvas {self.canvas}")
 
+    def _canvases(self, n: int) -> Canvases | None:
+        return self._session.canvases(n)
+
     def _forward(self, x: Canvases) -> list[torch.Tensor]:
         """BGR canvases, run in chunks of the session's batch size."""
         step = self._session.batch or len(x)

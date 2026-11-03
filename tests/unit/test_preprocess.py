@@ -27,7 +27,11 @@ def test_the_runtime_input_is_trainings(bgr) -> None:
     assert torch.equal(torch.from_numpy(planar(canvases)), want)
     assert torch.equal(network_input(canvases, torch.device("cpu")), want)
     if torch.cuda.is_available():
-        assert torch.allclose(network_input(canvases, torch.device("cuda")).cpu(), want)
+        # on the device too: training's own CUDA arithmetic, and planar layout
+        want_cuda = batch_to(to_tensor(letterbox(bgr, (128, 160))[0])[None], "cuda")
+        got = network_input(canvases, torch.device("cuda"))
+        assert got.is_contiguous()
+        assert torch.equal(got, want_cuda)
     assert metas[0]["shape"] == (97, 131)
 
 
@@ -43,3 +47,17 @@ def test_inputs_are_read_as_bgr(bgr, tmp_path) -> None:
     assert read_bgr(bgr.astype(np.float32)).dtype == np.uint8
     with pytest.raises(ValueError, match="BGR array"):
         read_bgr(bgr[:, :, 0])
+
+
+@pytest.mark.parametrize("hw", [(97, 131), (131, 97), (128, 160), (40, 30), (300, 500)])
+def test_letterboxing_into_a_buffer_is_trainings_letterbox(hw) -> None:
+    """Inference letterboxes into a runtime's buffer; training into a new
+    canvas. Same pixels, ratio and padding, whatever the image's shape."""
+    img = np.random.default_rng(1).integers(0, 256, (*hw, 3), dtype=np.uint8)
+    want, r, pad = letterbox(img, (128, 160))
+    buf = np.full((2, 128, 160, 3), 7, np.uint8)          # stale contents must not survive
+    got, metas = letterbox_batch([img, img], (128, 160), out=buf)
+    assert got is buf
+    for i in range(2):
+        assert np.array_equal(got[i], want)
+        assert metas[i] == {"ratio": r, "pad": pad, "shape": hw}

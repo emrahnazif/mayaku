@@ -116,6 +116,10 @@ class Session(Protocol):
 
     def __call__(self, x: Canvases) -> list[torch.Tensor]: ...
 
+    def canvases(self, n: int) -> Canvases | None:
+        """Its own input buffer for `n` images, to letterbox straight into
+        (TensorRT's pinned upload buffer), or None."""
+
 
 def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -> Session:
     """The runtime session for an artifact: called with BGR canvases on the
