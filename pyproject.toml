@@ -31,24 +31,15 @@ dependencies = [
   "pyyaml>=6.0",
   "typer>=0.12",
   "pycocotools>=2.0.7",
+  # every export goes through ONNX; the deployment runtimes (onnxruntime,
+  # OpenVINO, Core ML, TensorRT) are installed when first used, see
+  # mayaku/utils/requirements.py
+  "onnx>=1.16",
 ]
 
-[project.optional-dependencies]
-# onnxruntime is intentionally not pinned here: CPU and CUDA hosts need
-# different wheels (onnxruntime vs onnxruntime-gpu). Install manually:
-#   CPU / Apple Silicon:  pip install onnxruntime
-#   CUDA Linux/Windows:   pip install onnxruntime-gpu
-# The CLI reports the right install command if the package is missing.
-onnx = ["onnx>=1.16"]
-coreml = ["onnx>=1.16", "coremltools>=8.0"]
-openvino = ["onnx>=1.16", "openvino>=2024.3"]
-# TensorRT is CUDA-only and has no macOS wheels; the marker keeps a single
-# `pip install mayaku[tensorrt]` harmless there.
-# TensorRT 11 builds strongly typed: fp16 / int8 engines need the graph in
-# fp16 first, which NVIDIA ModelOpt converts (unused on TensorRT 10).
-tensorrt = ["onnx>=1.16", "tensorrt>=10.0; sys_platform != 'darwin'",
-            "nvidia-modelopt[onnx]>=0.44; sys_platform != 'darwin'"]
-
+[dependency-groups]
+# Development only, never part of the published package: install with
+# `pip install -e . --group dev` (pip >= 25.1).
 # The lint/type toolchain is PINNED, not floored. ruff and mypy change their
 # diagnostics between releases, and typeshed stubs change whether a third-party
 # call counts as typed — so an unpinned floor means CI resolves the newest on

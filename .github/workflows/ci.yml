@@ -11,6 +11,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The runtimes the tests need are installed explicitly below; nothing is
+# installed behind the job's back (mayaku/utils/requirements.py).
+env:
+  MAYAKU_AUTOINSTALL: "0"
+
 jobs:
   lint:
     name: Lint (ruff)
@@ -21,7 +26,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e '.[dev]'
+      - run: python -m pip install -U pip   # --group needs pip >= 25.1
+      - run: pip install -e . --group dev
       - run: ruff check src tests
 
   typecheck:
@@ -37,10 +43,11 @@ jobs:
           # Python 3.12 and greater") — it aborts before checking our code.
           python-version: "3.10"
           cache: pip
-      # mypy needs the onnx types in scope. `typecheck` additionally pins
-      # torch/torchvision -- mypy input, see the extra in pyproject.toml. The
+      # mypy needs the openvino types in scope. `typecheck` additionally pins
+      # torch/torchvision -- mypy input, see the group in pyproject.toml. The
       # test matrix below deliberately omits it.
-      - run: pip install -e '.[dev,typecheck,openvino]'
+      - run: python -m pip install -U pip
+      - run: pip install -e . --group dev --group typecheck openvino
       - run: mypy
 
   test:
@@ -56,11 +63,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e '.[dev,openvino]'
-      # onnxruntime is intentionally not in `[onnx]` (CPU vs GPU wheels
-      # differ); install the CPU build explicitly so the `onnx`-marked
-      # tests can actually run.
-      - run: pip install onnxruntime
+      - run: python -m pip install -U pip
+      # the CPU runtimes, so the `onnx`- and openvino-marked tests run
+      - run: pip install -e . --group dev openvino onnxruntime
       # Skip what needs hardware we don't have here (cuda / multi_gpu: no
       # NVIDIA GPU; mps: no Apple Silicon) and the slow job's tests.
       - run: >
@@ -81,8 +86,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e '.[dev,openvino]'
-      - run: pip install onnxruntime
+      - run: python -m pip install -U pip
+      - run: pip install -e . --group dev openvino onnxruntime
       - run: >
           pytest
           -m "slow and not cuda and not mps and not multi_gpu"

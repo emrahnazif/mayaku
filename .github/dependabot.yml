@@ -1,6 +1,6 @@
 # Keeps the pinned lint/type toolchain fresh without letting it drift.
 #
-# `[project.optional-dependencies].dev` pins ruff, mypy and the typeshed stubs
+# The `dev` dependency group pins ruff, mypy and the typeshed stubs
 # exactly, because their *diagnostics* change between releases: an unpinned
 # floor means CI resolves the newest on every run while a developer machine
 # stays wherever it was installed, and the two then disagree about code neither
@@ -26,7 +26,7 @@ updates:
           - "types-*"
       # Its own group, not folded into the one above: torch is pinned for the
       # same reason (its inline annotations are mypy input, see the `typecheck`
-      # extra) but ships on its own cadence, and a torch bump is a far bigger
+      # group) but ships on its own cadence, and a torch bump is a far bigger
       # review surface than a ruff patch. Fusing the two would recreate exactly
       # the non-isolation this file exists to prevent.
       typecheck-torch:

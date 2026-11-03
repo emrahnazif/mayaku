@@ -72,7 +72,7 @@ def _verify_editable_install() -> None:
     module collection fails with ``ModuleNotFoundError`` on a
     submodule that exists on disk but not on the pinned path.
 
-    Recovery is one command (``pip install -e '.[dev]'``); this guard
+    Recovery is one command (``pip install -e . --group dev``); this guard
     surfaces it as a single banner-line error instead of nine
     collection tracebacks. We've hit this twice — once on macOS, once
     on Linux — so the diagnostic earns its keep.
@@ -81,7 +81,7 @@ def _verify_editable_install() -> None:
         mayaku = importlib.import_module("mayaku")
     except ImportError as exc:
         pytest.exit(
-            f"`import mayaku` failed: {exc}. Run `pip install -e '.[dev]'` from {_PROJECT_ROOT}.",
+            f"`import mayaku` failed: {exc}. Run `pip install -e . --group dev` from {_PROJECT_ROOT}.",
             returncode=2,
         )
     actual_file = getattr(mayaku, "__file__", None)
@@ -89,14 +89,14 @@ def _verify_editable_install() -> None:
         pytest.exit(
             "mayaku has no __file__ — likely resolved as a namespace package "
             "to an empty directory. Run "
-            f"`pip install -e '.[dev]'` from {_PROJECT_ROOT}.",
+            f"`pip install -e . --group dev` from {_PROJECT_ROOT}.",
             returncode=2,
         )
     actual = Path(actual_file).resolve()
     if actual != _EXPECTED_MAYAKU_INIT.resolve():
         pytest.exit(
             f"mayaku resolves to {actual} but tests live under "
-            f"{_EXPECTED_MAYAKU_INIT}. Run `pip install -e '.[dev]'` "
+            f"{_EXPECTED_MAYAKU_INIT}. Run `pip install -e . --group dev` "
             f"from {_PROJECT_ROOT} to re-pin the editable install.",
             returncode=2,
         )
