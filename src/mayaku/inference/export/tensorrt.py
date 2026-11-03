@@ -30,6 +30,7 @@ import torch
 from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_header
 from mayaku.inference.export.onnx import onnx_graph
 from mayaku.model import Detector
+from mayaku.utils.requirements import require
 
 PRECISIONS = ("fp16", "int8", "fp32")
 
@@ -90,12 +91,10 @@ def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
     cannot hold on that image keeps a node in fp32 -- every node converts, as
     TensorRT 10's fp16 flag converts it (neither guards overflow on real
     images). Written next to `src`."""
-    try:
-        from modelopt.onnx import autocast
-    except ImportError as e:
-        raise ImportError("TensorRT 11 builds fp16 and int8 from an fp16 ONNX graph; "
-                          "install NVIDIA ModelOpt: pip install 'nvidia-modelopt[onnx]'") from e
     import onnx
+
+    require("modelopt")              # TensorRT 11's fp16 graph needs NVIDIA ModelOpt
+    from modelopt.onnx import autocast
 
     gray = np.full((batch, 3, *canvas), 114 / 255, np.float32)
     out = src.with_suffix(".fp16.onnx")

@@ -24,15 +24,26 @@ import json
 from pathlib import Path
 from typing import Any
 
-__all__ = ["SIDECAR_KEY", "SUFFIX_TO_TARGET", "embed_sidecar", "read_sidecar", "target_from_suffix"]
+__all__ = ["RUNTIME", "SIDECAR_KEY", "SUFFIX_TO_TARGET", "embed_sidecar", "read_sidecar", "target_from_suffix"]
 
 from mayaku.utils.checkpoint import SIDECAR_KEY
+from mayaku.utils.requirements import require
 
 SUFFIX_TO_TARGET: dict[str, str] = {
     ".onnx": "onnx",
     ".mlpackage": "coreml",
     ".xml": "openvino",
     ".engine": "tensorrt",
+}
+
+#: The runtime each target writes, reads and runs its artifacts with; required
+#: (installed on first use, `mayaku.utils.requirements`) here and in
+#: `export` / `open_session`, so no target module imports it unchecked.
+RUNTIME: dict[str, str] = {
+    "onnx": "onnxruntime",
+    "coreml": "coremltools",
+    "openvino": "openvino",
+    "tensorrt": "tensorrt",
 }
 
 
@@ -80,8 +91,10 @@ def read_sidecar(path: Path, target: str) -> dict[str, Any] | None:
     if target == "onnx":
         blob = _read_onnx(path)
     elif target == "coreml":
+        require(RUNTIME[target])
         blob = _read_coreml(path)
     elif target == "openvino":
+        require(RUNTIME[target])
         blob = _read_openvino(path)
     elif target == "tensorrt":
         blob = _read_tensorrt(path)

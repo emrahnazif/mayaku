@@ -37,9 +37,10 @@ from typing import Any, Protocol, cast
 import torch
 
 from mayaku.data.batch import batch_to
-from mayaku.inference.export.metadata import SUFFIX_TO_TARGET, target_from_suffix
+from mayaku.inference.export.metadata import RUNTIME, SUFFIX_TO_TARGET, target_from_suffix
 from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
+from mayaku.utils.requirements import require
 
 __all__ = ["TARGETS", "Target", "export", "open_session"]
 
@@ -95,6 +96,8 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
     path, canvas = Path(path), tuple(sidecar["canvas_hw"])
     m = model.for_deploy().cpu()
     sidecar = {**sidecar, "export": {"target": target, "precision": precision}}
+    if target != "tensorrt" or torch.cuda.is_available():   # else `write` explains
+        require(RUNTIME[target])
     t.module.write(m, path, canvas, precision, sidecar)
     if not t.module.runnable():
         return path
@@ -120,7 +123,9 @@ def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -
     returns the raw maps as tensors in the sidecar's output order, on the
     device it ran on, possibly its own buffers until its next call. `batch`
     is the batch size it was traced at (None: any)."""
-    t = TARGETS[target_from_suffix(path)]
+    target = target_from_suffix(path)
+    require(RUNTIME[target])
+    t = TARGETS[target]
     precision = sidecar["export"]["precision"]
     return cast(Session, t.module.Session(Path(path), list(sidecar["outputs"]), precision, device))
 

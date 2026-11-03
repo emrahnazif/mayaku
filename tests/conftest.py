@@ -21,6 +21,9 @@ from pathlib import Path
 import pytest
 import torch
 
+# the test suite never installs a runtime behind the user's back
+os.environ.setdefault("MAYAKU_AUTOINSTALL", "0")
+
 _VALID_DEVICES = ("cpu", "mps", "cuda")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _EXPECTED_MAYAKU_INIT = _PROJECT_ROOT / "src" / "mayaku" / "__init__.py"
