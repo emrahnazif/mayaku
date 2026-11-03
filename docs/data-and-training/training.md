@@ -49,7 +49,7 @@ When you start from a checkpoint, the weights are loaded into the model your con
 - **Class count.** It may differ from the checkpoint's. The class layer is re-initialized for your classes, and the log says `classifier re-initialised for N classes`.
 - **Heads.** Masks, keypoints and oriented boxes may be added to or removed from a detector's weights. For example, `mayaku-n-det` with `--set model.seg=true` trains a segmentation model whose backbone and box head start pretrained and whose mask branch starts fresh.
 - **Size.** It cannot change. `mayaku-n-det` loads only into an `n` model. Setting `model.tier=s` with `n` weights fails with `state dict does not fit this model`.
-- **Keypoint count.** It cannot change from the checkpoint's. To train a different keypoint count, start from the detector weights (`mayaku-n-det`), not from `mayaku-n-key`. See [Keypoint detection](/mayaku/more-tasks/keypoints/).
+- **Keypoint count.** It cannot change from the checkpoint's. To train a different keypoint count, start from the detector weights (`mayaku-n-det`). See [Keypoint detection](/mayaku/more-tasks/keypoints/).
 
 ### Training from scratch
 
@@ -271,7 +271,7 @@ For several machines, start Mayaku under `torchrun`, leave `--num-gpus` at 1, an
 
 ```bash
 torchrun --nnodes 2 --nproc-per-node 8 --rdzv-backend c10d --rdzv-endpoint HOST:29500 \
-  -m mayaku.cli train --weights mayaku-l-det \
+  -m mayaku.cli train --weights mayaku-m-det \
   --annotations data/train/_annotations.coco.json --images data/train \
   --val-annotations data/valid/_annotations.coco.json --val-images data/valid
 ```

@@ -77,7 +77,7 @@ On Apple Silicon, Mayaku sets the environment variable `PYTORCH_ENABLE_MPS_FALLB
 ## Install from source
 
 ```bash
-git clone https://github.com/datamarkin/mayaku.git
+git clone https://github.com/emrahnazif/mayaku.git
 cd mayaku
 pip install -e .
 ```

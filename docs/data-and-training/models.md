@@ -1,6 +1,6 @@
 ---
 title: Pretrained models, sizes and downloads
-summary: The hosted model names, the four model sizes with their parameters and compute, and how weights download.
+summary: The hosted model names, the model sizes with their parameters and compute, and how weights download.
 label: Models
 keywords: mayaku, pretrained models, model zoo, model sizes, download
 ---
@@ -9,41 +9,33 @@ keywords: mayaku, pretrained models, model zoo, model sizes, download
 
 Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pretrained(...)`, `mayaku predict`, `mayaku eval`, `mayaku export`). The checkpoint downloads the first time it is used.
 
-| Name | Size | Task |
-|---|---|---|
-| `mayaku-n-det` | nano | Object detection |
-| `mayaku-s-det` | small | Object detection |
-| `mayaku-m-det` | medium | Object detection |
-| `mayaku-l-det` | large | Object detection |
-| `mayaku-n-seg` | nano | Instance segmentation |
-| `mayaku-s-seg` | small | Instance segmentation |
-| `mayaku-m-seg` | medium | Instance segmentation |
-| `mayaku-l-seg` | large | Instance segmentation |
-| `mayaku-n-key` | nano | Keypoint detection |
-| `mayaku-s-key` | small | Keypoint detection |
-| `mayaku-m-key` | medium | Keypoint detection |
-| `mayaku-l-key` | large | Keypoint detection |
+| Name | Size | Task | Status |
+|---|---|---|---|
+| `mayaku-n-det` | nano | Object detection | released |
+| `mayaku-n-seg` | nano | Instance segmentation | released |
+| `mayaku-m-det` | medium | Object detection | finishing training |
+| `mayaku-m-seg` | medium | Instance segmentation | finishing training |
 
-The pattern is `mayaku-<size>-<task>`. To see what is currently hosted:
+All are pretrained on Objects365. The pattern is `mayaku-<size>-<task>`. To see what is currently hosted:
 
 ```bash
 mayaku download --list
 ```
 
-No oriented-box or classification models are hosted. Train those from the detector weights of the size you want: [oriented boxes](/mayaku/more-tasks/oriented-boxes/#train), [classification](/mayaku/more-tasks/classification/#train).
+No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/mayaku/more-tasks/keypoints/), [oriented boxes](/mayaku/more-tasks/oriented-boxes/#train), [classification](/mayaku/more-tasks/classification/#train).
 
 ## Sizes
 
-All four sizes share one architecture and differ in width and depth. Larger is more accurate and slower.
+All sizes share one architecture and differ in width and depth. Larger is more accurate and slower. Pretrained weights are hosted for nano and medium; small and large can be trained from scratch with `model.tier`.
 
-| Size | `model.tier` | Parameters | Compute at 640×640 |
-|---|---|---|---|
-| nano | `n` | 5.2 M | 6.4 GMACs |
-| small | `s` | 13.9 M | 18.8 GMACs |
-| medium | `m` | 32.4 M | 44.0 GMACs |
-| large | `l` | 57.9 M | 77.9 GMACs |
+| Size | `model.tier` | Parameters | Compute at 640×640 | Pretrained |
+|---|---|---|---|---|
+| nano | `n` | 5.2 M | 6.7 GMACs | yes |
+| small | `s` | 13.9 M | 19.7 GMACs | no |
+| medium | `m` | 32.4 M | 46.3 GMACs | yes |
+| large | `l` | 57.9 M | 81.9 GMACs | no |
 
-Figures are for a detection model with 80 classes in its exported form. A mask or keypoint branch adds about 0.1 to 0.4 M parameters and 1 to 1.4 GMACs. The class count changes the parameter count slightly. Compute grows with the canvas: a 576×1024 canvas costs about 1.44 times what 640×640 costs.
+Figures are for a detection model with 80 classes in its exported form. A mask branch adds about 0.1 to 0.3 M parameters and 0.4 to 1 GMACs. The class count changes the parameter count slightly. Compute grows with the canvas: a 576×1024 canvas costs about 1.44 times what 640×640 costs.
 
 How to choose:
 
@@ -101,7 +93,7 @@ mayaku download mayaku-m-det --cache-dir weights/
 from pathlib import Path
 from mayaku.utils.download import download_model, list_models, list_revisions
 
-list_models()                          # {"detection": ["mayaku-l-det", ...], "segmentation": [...], ...}
+list_models()                          # {"detection": ["mayaku-m-det", "mayaku-n-det"], "segmentation": [...]}
 list_revisions("mayaku-n-det")         # ["2026-07-02", ...], oldest first
 path = download_model("mayaku-n-det")  # Path to the .pth
 path = download_model("mayaku-n-det", revision="2026-07-02", cache_dir=Path("weights"))

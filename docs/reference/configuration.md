@@ -43,7 +43,7 @@ To combine a YAML file with extra settings in Python, pass both. `overrides` is 
 ```python
 from mayaku import train
 
-train("my_run.yaml", weights="mayaku-s-det", overrides={"train": {"epochs": 50}},
+train("my_run.yaml", weights="mayaku-m-det", overrides={"train": {"epochs": 50}},
       train_annotations="data/train/_annotations.coco.json", train_images="data/train")
 ```
 

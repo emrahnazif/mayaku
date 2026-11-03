@@ -50,7 +50,7 @@ Examples:
 
 ```bash
 # fine-tune the small detector
-mayaku train --weights mayaku-s-det \
+mayaku train --weights mayaku-m-det \
   --annotations data/train/_annotations.coco.json --images data/train \
   --val-annotations data/valid/_annotations.coco.json --val-images data/valid
 

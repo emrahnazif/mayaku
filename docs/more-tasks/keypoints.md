@@ -58,25 +58,7 @@ result = train(
 
 The box part starts pretrained and the keypoint branch starts fresh. Keypoint names and left/right pairs are filled in from your categories ([auto-config](/mayaku/data-and-training/training/#auto-config)) and saved in the checkpoint.
 
-### Starting from a pretrained keypoint model
-
-The `mayaku-{n,s,m,l}-key` models come with a pretrained keypoint branch for a fixed number of keypoints. They are the better start **only when your data has the same keypoint count**. Check it:
-
-```python
-from mayaku import from_pretrained
-
-print(from_pretrained("mayaku-n-key").sidecar["keypoints"]["num"])
-```
-
-With a matching count:
-
-```bash
-mayaku train --weights mayaku-n-key \
-  --annotations data/train/_annotations.coco.json --images data/train \
-  --val-annotations data/valid/_annotations.coco.json --val-images data/valid
-```
-
-The keypoint count can't change during a warm start. Starting from a `-key` model with a different `model.keypoints.num` fails with `state dict does not fit this model: ['aux.heat.weight', ...]`. In that case start from `mayaku-n-det`, as shown above.
+No pretrained keypoint model is hosted: keypoint detection is experimental. Start from the detector weights (`mayaku-n-det`), as shown above. A checkpoint you trained yourself continues only with the same keypoint count; a different `model.keypoints.num` fails with `state dict does not fit this model: ['aux.heat.weight', ...]`.
 
 ## Validation and metrics
 

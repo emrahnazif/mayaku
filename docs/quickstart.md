@@ -92,7 +92,7 @@ Each `auto-config` line is a setting Mayaku derived from your data because you d
 
 When training finishes, the command prints `final weights: runs/mayaku-n-det/train/best.pt`.
 
-To pick a size other than nano, use `mayaku-s-det`, `mayaku-m-det` or `mayaku-l-det`. See [Models](/mayaku/data-and-training/models/). For every training option, see [Training](/mayaku/data-and-training/training/).
+For the medium size, use `mayaku-m-det`. See [Models](/mayaku/data-and-training/models/). For every training option, see [Training](/mayaku/data-and-training/training/).
 
 ## 4. Predict
 
