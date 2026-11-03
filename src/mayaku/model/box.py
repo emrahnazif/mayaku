@@ -51,11 +51,14 @@ def flatten_levels(maps, c):
     return torch.cat([m.reshape(b, c, -1) for m in maps], 2).permute(0, 2, 1)
 
 
-def flatten_head(preds, nc, reg_max):
-    """[cls0, box0, cls1, box1, ...] -> (B, N, nc), (B, N, 4R), level shapes."""
+def flatten_head(preds, nc, reg_max, contiguous=True):
+    """[cls0, box0, cls1, box1, ...] -> (B, N, nc), (B, N, 4R), level shapes.
+    `contiguous=False` leaves both as strided views of one concatenation each:
+    a decode that reads only the anchors passing the score threshold skips
+    two full-map copies (about 2.7 MB at 640x640)."""
     shapes = [tuple(c.shape[2:]) for c in preds[0::2]]
-    return (flatten_levels(preds[0::2], nc).contiguous(),
-            flatten_levels(preds[1::2], 4 * reg_max).contiguous(), shapes)
+    cls, dist = flatten_levels(preds[0::2], nc), flatten_levels(preds[1::2], 4 * reg_max)
+    return (cls.contiguous(), dist.contiguous(), shapes) if contiguous else (cls, dist, shapes)
 
 
 def decode_head(preds, nc, reg_max):
@@ -67,20 +70,25 @@ def decode_head(preds, nc, reg_max):
     # head's own; the detection decode reads exactly two per level
     cls, dist, shapes = flatten_head(preds[:2 * len(STRIDES)], nc, reg_max)
     points, stride = anchor_grid(shapes, STRIDES, device=cls.device, dtype=cls.dtype)
-    return cls, dist, ltrb_to_xyxy(dfl_expectation(dist, reg_max), points,
-                                   stride), points, stride, shapes
+    return cls, dist, decode_boxes(dist, points, stride, reg_max), points, stride, shapes
+
+
+def decode_boxes(dist, points, stride, reg_max):
+    """Bin logits (..., N, 4R) of N anchors -> (..., N, 4) xyxy boxes in pixels.
+    Any subset of anchors, with their points and strides: the deployed decode
+    runs it on the anchors that pass the score threshold only."""
+    return ltrb_to_xyxy(dfl_expectation(dist, reg_max), points, stride)
 
 
 def dfl_expectation(logits, reg_max):
-    """(B, N, 4*reg_max) bin logits -> (B, N, 4) expected ltrb distances.
+    """(..., 4*reg_max) bin logits -> (..., 4) expected ltrb distances.
 
     The head predicts a distribution over `reg_max` integer distances per side
     rather than one number, which lets the box loss express uncertainty. The
     expectation is the softmax mean, GFL (Li et al. 2020, arXiv 2006.04388)
     Eq. 5 with unit bin spacing. The bins here are 0..reg_max-1.
     """
-    b, n, _ = logits.shape
-    p = logits.view(b, n, 4, reg_max).softmax(-1)
+    p = logits.unflatten(-1, (4, reg_max)).softmax(-1)
     bins = torch.arange(reg_max, device=logits.device, dtype=logits.dtype)
     return (p * bins).sum(-1)
 

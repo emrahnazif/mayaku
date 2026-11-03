@@ -20,7 +20,8 @@ from mayaku.data.geometry import unletterbox, unletterbox_maps
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
 from mayaku.model import obb as obblib
-from mayaku.model.box import decode_head
+from mayaku.model.blocks import STRIDES
+from mayaku.model.box import anchor_grid, decode_boxes, flatten_head
 from mayaku.model.detector import split_outputs
 
 __all__ = ["DEPLOY", "Classification", "Decode", "Detections", "decode", "decode_sidecar",
@@ -111,13 +112,18 @@ def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
     on ProbIoU, and each row carries the box's xywhr after its class,
     [x1, y1, x2, y2, score, class, cx, cy, w, h, theta], the first four
     being the hull.
+
+    Axis-aligned boxes are decoded for the surviving anchors only: the score
+    threshold runs on the class logits first, so the DFL expectation and the
+    box arithmetic touch tens of anchors instead of every one (8400 at
+    640x640), through the same `decode_boxes` training uses.
     """
-    cls, dist, boxes, points, stride, _ = decode_head(preds, nc, reg_max)
-    if ang is not None:
-        boxes = obblib.decode_head(ang, dist, points, stride, reg_max)
+    cls, dist, shapes = flatten_head(preds[:2 * len(STRIDES)], nc, reg_max, contiguous=ang is not None)
+    points, stride = anchor_grid(shapes, STRIDES, device=cls.device, dtype=cls.dtype)
+    rboxes = None if ang is None else obblib.decode_head(ang, dist, points, stride, reg_max)
     floor = math.log(d.conf / (1 - d.conf))
     out, idxs = [], []
-    for logits, bx in zip(cls, boxes, strict=True):
+    for b, logits in enumerate(cls):
         # the survivors' indices once: each boolean-mask index syncs the host
         if d.multi_label:
             anchor, lab = (logits > floor).nonzero(as_tuple=True)
@@ -129,15 +135,15 @@ def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
         if len(score) > d.topk:
             keep = score.topk(d.topk).indices
             score, lab, anchor = score[keep], lab[keep], anchor[keep]
-        box = bx[anchor]
-        if ang is not None:
+        if rboxes is not None:
+            box = rboxes[b][anchor]
             keep = obblib.nms(box, score, lab, d.iou)[:d.max_det]
             out.append(torch.cat((obblib.to_xyxy(box[keep]), score[keep, None],
                                   lab[keep, None].float(), box[keep]), 1))
-            idxs.append(anchor[keep])
-            continue
-        keep = batched_nms(box, score, lab, d.iou)[:d.max_det]
-        out.append(torch.cat((box[keep], score[keep, None], lab[keep, None].float()), 1))
+        else:
+            box = decode_boxes(dist[b, anchor], points[anchor], stride[anchor], reg_max)
+            keep = batched_nms(box, score, lab, d.iou)[:d.max_det]
+            out.append(torch.cat((box[keep], score[keep, None], lab[keep, None].float()), 1))
         idxs.append(anchor[keep])
     return out, idxs, points, stride
 
