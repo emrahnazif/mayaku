@@ -4,8 +4,9 @@ Two kinds of override, both skipped for any field the user set explicitly:
 
 * **Structural facts**, at any dataset size: the class count, the canvas (the
   data's aspect under the size budget, `mayaku.data.canvas.canvas_for_data`),
-  and, for a keypoint model, the keypoint names and left/right flip pairs the
-  annotations define.
+  for a keypoint model, the keypoint names and left/right flip pairs the
+  annotations define, and the mask branch turned off when the annotations
+  carry no masks (a segmentation checkpoint fine-tuned on box-only data).
 * **The fine-tune recipe**, applied only when training starts from pretrained
   weights and the dataset has at least `MIN_IMAGES_FOR_AUTO_CONFIG` images:
   run length, the clean final stage, the assigner and, on small datasets,
@@ -18,9 +19,10 @@ built without a class count and a canvas: left unset, they are filled plainly
 -- the data's class count, a square canvas at the size budget. A class count
 that disagrees with the data raises either way.
 
-Auto-config adapts the run to the data; it never changes the model or its
-loss. The only fields it may set are listed in `AUTO_PATHS`, and a test holds
-every override to that list.
+Auto-config adapts the run to the data; beyond dropping a mask branch the
+data cannot train, it never changes the model or its loss. The only fields
+it may set are listed in `AUTO_PATHS`, and a test holds every override to
+that list.
 
 The fine-tune numbers below follow babasu's measured recipe. The mosaic
 strength on small datasets is carried over from mayaku 2.x and still open.
@@ -44,6 +46,7 @@ __all__ = ["AUTO_PATHS", "MIN_IMAGES_FOR_AUTO_CONFIG", "apply_auto_config", "col
 #: checkpoint.
 AUTO_PATHS: Final = frozenset({
     "model.num_classes",
+    "model.seg",
     "model.keypoints.names",
     "model.keypoints.flip_pairs",
     "input.canvas_hw",
@@ -82,6 +85,9 @@ def _structural(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
         "model": {"num_classes": len(coco.cat_ids)},
         "input": {"canvas_hw": canvas_for_data(coco.shapes, cfg.input.size_budget)},
     }
+    if cfg.model.seg and not coco.has_masks:
+        # a segmentation checkpoint fine-tuned on box-only data: no mask to learn
+        out["model"]["seg"] = False
     if cfg.model.keypoints is not None and coco.kpt_names:
         out["model"]["keypoints"] = {"names": tuple(coco.kpt_names),
                                      "flip_pairs": coco.kpt_flip_pairs}

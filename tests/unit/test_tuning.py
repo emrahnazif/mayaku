@@ -108,3 +108,14 @@ def test_health_report(tmp_path) -> None:
     assert health_check(ann, tmp_path, pinned)["canvas"] == [256, 384]
     assert abs(sum(r["object_size"].values()) - 1.0) < 0.02
     assert set(r["class_counts"]) <= {"c0", "c1", "c2", "c3"} and r["warnings"] == []
+
+
+def test_a_mask_branch_without_masks_in_the_data_is_dropped(tmp_path) -> None:
+    box_only = load_coco(str(tmp_path), synthetic_coco(str(tmp_path), n=12, masks=False), masks=True)
+    seg = MayakuConfig(model=ModelConfig(seg=True))
+    cfg, changes = apply_auto_config(seg, box_only)
+    assert not cfg.model.seg and ("model.seg", True, False) in changes
+    # data with masks keeps the branch, and a user who pinned it keeps it too
+    with_masks = load_coco(str(tmp_path / "m"), synthetic_coco(str(tmp_path / "m"), n=12))
+    assert apply_auto_config(seg, with_masks)[0].model.seg
+    assert apply_auto_config(seg, box_only, {"model.seg"})[0].model.seg

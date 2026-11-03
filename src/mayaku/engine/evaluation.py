@@ -142,6 +142,13 @@ def ground_truth(ann_path):
         return COCO(ann_path)
 
 
+@functools.cache
+def has_masks(ann_path):
+    """Whether any annotation in the file carries a segmentation; box-only
+    data (RF100-VL writes ``"segmentation": []``) has no mask AP to score."""
+    return any(a.get("segmentation") for a in ground_truth(ann_path).dataset["annotations"])
+
+
 def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
     """COCO metrics for a list of result records; `iou_type` is bbox, segm or
     keypoints (with `k` keypoints per instance). Keypoints report ten
@@ -176,10 +183,12 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
 
 def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, image_ids=None):
     """COCO metrics for `(image_id, Detections)` pairs: box AP, plus mask AP
-    under "segm_" and keypoint AP under "kpt_" when the model has those heads.
+    under "segm_" and keypoint AP under "kpt_" when the model has those heads
+    (mask AP only when the ground truth has masks).
     Keypoints are scored against `kpt_ann_path` when the file is separate.
     `image_ids` scores those images only, not the whole file. Oriented boxes
     (detections with `rboxes`) are scored by their rotated IoU."""
+    seg = seg and has_masks(ann_path)
     results, segm, kpts = [], [], []
     for image_id, det in detections:
         results += to_coco(det, image_id, cat_ids)

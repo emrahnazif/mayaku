@@ -7,12 +7,13 @@ import dataclasses
 import pytest
 import torch
 
+from mayaku.data.coco import load_coco
 from mayaku.data.geometry import unletterbox
 from mayaku.engine.evaluation import coco_ap, evaluate, score, to_coco, to_coco_segm
 from mayaku.inference.decode import DEPLOY, Detections, postprocess
 from mayaku.model import STRIDES, TINY, Detector
 
-from ._coco_fixture import fixture
+from ._coco_fixture import fixture, synthetic_coco
 
 
 @pytest.fixture(scope="module")
@@ -178,3 +179,13 @@ def test_rle_batch_equals_pycocotools() -> None:
     assert rle_batch(m) == [rle(x) for x in m]
     big = torch.rand(3, 61, 47, generator=g) > 0.7
     assert rle_batch(big) == [rle(x) for x in big]
+
+
+def test_a_mask_model_on_box_only_ground_truth_scores_boxes_only(tmp_path) -> None:
+    coco = load_coco(str(tmp_path), synthetic_coco(str(tmp_path), n=6, masks=False))
+    dets = []
+    for i in range(len(coco.ids)):
+        labels = torch.from_numpy(coco.labels[i])
+        dets.append((coco.ids[i], _as_detections(labels, torch.ones(len(labels), 8, 8, dtype=torch.bool))))
+    out = score(coco.ann_path, dets, coco.cat_ids, seg=True)
+    assert out["AP"] > 0.999 and not any(k.startswith("segm_") for k in out)

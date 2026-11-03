@@ -69,6 +69,7 @@ class CocoLabels:
     labels: SerializedList
     polys: SerializedList
     kpts: SerializedList
+    has_masks: bool        # any annotation carries a segmentation, whatever was requested
 
 
 def load_coco(images, annotations, masks=False, kpt=0, kpt_annotations=None):
@@ -100,8 +101,9 @@ def load_coco(images, annotations, masks=False, kpt=0, kpt_annotations=None):
     dense = {c: i for i, c in enumerate(cat_ids)}
 
     per_image, segs, kps = {}, {}, {}
-    degenerate = 0
+    degenerate, has_masks = 0, False
     for a in data["annotations"]:
+        has_masks = has_masks or bool(a.get("segmentation"))
         if not keep_ann(a):
             degenerate += not a.get("iscrowd", 0)
             continue
@@ -134,4 +136,5 @@ def load_coco(images, annotations, masks=False, kpt=0, kpt_annotations=None):
                              if masks else []),
         kpts=SerializedList([np.array(kps.get(im["id"], []), np.float32).reshape(-1, 3 * kpt)
                              for im in ims] if kpt else []),
+        has_masks=has_masks,
     )

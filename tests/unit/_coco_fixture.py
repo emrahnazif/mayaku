@@ -20,8 +20,10 @@ from mayaku.data import CocoDetection
 SYNTH_KPT = 3   # keypoints per synthetic object
 
 
-def synthetic_coco(root, n=12, nc=4, seed=0):
-    """Write `n` images and an instances.json under `root`; return its path."""
+def synthetic_coco(root, n=12, nc=4, seed=0, masks=True):
+    """Write `n` images and an instances.json under `root`; return its path.
+    `masks` False writes box-only annotations (``"segmentation": []``, as
+    RF100-VL does)."""
     rng = random.Random(seed)
     os.makedirs(root, exist_ok=True)
     images, anns = [], []
@@ -37,7 +39,7 @@ def synthetic_coco(root, n=12, nc=4, seed=0):
             img[y:y + bh, x:x + bw] = [60 * c + 40, 255 - 50 * c, 30 * c]
             anns.append({"id": len(anns) + 1, "image_id": i, "category_id": c + 1,
                          "bbox": [x, y, bw, bh], "area": bw * bh, "iscrowd": 0,
-                         "segmentation": [[x, y, x + bw, y, x + bw, y + bh, x, y + bh]],
+                         "segmentation": [[x, y, x + bw, y, x + bw, y + bh, x, y + bh]] if masks else [],
                          "keypoints": [x, y, 2, x + bw / 2, y + bh / 2, 2, x + bw, y + bh, 2],
                          "num_keypoints": 3})
         cv2.imwrite(os.path.join(root, "%03d.jpg" % i), img)
