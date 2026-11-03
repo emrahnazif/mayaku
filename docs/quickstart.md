@@ -85,7 +85,7 @@ For a 300-image dataset of 4:3 photos with 3 classes, the log starts like this:
 [mayaku.train] auto-config train.aug.mosaic: 1.0 -> 0.1
 [mayaku.train] auto-config train.epochs: 125 -> 100
 [mayaku.train] auto-config train.final_frac: 0.16 -> 0.2
-[mayaku.train] tier n, 3 classes, canvas 672x896, 100 epochs, batch 16 on cuda -> runs/mayaku-n-det/train
+[mayaku.train] tier n, 3 classes, canvas 672x896, 100 epochs, batch 8 on cuda -> runs/mayaku-n-det/train
 ```
 
 Each `auto-config` line is a setting Mayaku derived from your data because you didn't set it yourself. See [Training](/mayaku/data-and-training/training/#auto-config).
@@ -136,7 +136,6 @@ See [Evaluation](/mayaku/deployment/evaluation/) for every metric key.
 ## 6. Export
 
 ```bash
-pip install "mayaku[onnx]" onnxruntime
 mayaku export onnx runs/mayaku-n-det/train/best.pt --output model.onnx
 ```
 

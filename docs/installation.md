@@ -31,25 +31,20 @@ pip install mayaku
 
 On Apple Silicon the default macOS wheels already include MPS support.
 
-## Optional packages for export
+## Export runtimes install themselves
 
-Each export target is an optional extra. Install only the ones you deploy to:
+`pip install mayaku` has no extras. The runtime an export target needs is installed the first time you export to it or load one of its files, with a line saying what is being installed:
 
-| Target | Install | Notes |
+| Target | Installed on first use | Notes |
 |---|---|---|
-| ONNX | `pip install "mayaku[onnx]" onnxruntime` | See the onnxruntime note below. |
-| Core ML | `pip install "mayaku[coreml]"` | The `.mlpackage` can be written on any OS, but it is only checked and run on macOS. |
-| OpenVINO | `pip install "mayaku[openvino]"` | Intel CPUs, integrated GPUs and NPUs. |
-| TensorRT | `pip install "mayaku[tensorrt]"` | Linux with an NVIDIA GPU. Installs `tensorrt` and `nvidia-modelopt[onnx]`. |
+| ONNX | `onnxruntime-gpu` matching your torch's CUDA build with an NVIDIA GPU, else `onnxruntime` | Export runs the file once to check it, so exporting needs it too. |
+| Core ML | `coremltools` | The `.mlpackage` can be written on any OS, but it is only checked and run on macOS. |
+| OpenVINO | `openvino` | Intel CPUs, integrated GPUs and NPUs. |
+| TensorRT | `tensorrt-cu12` (or `-cu13`) 10.x, matching your torch's CUDA build | Linux with an NVIDIA GPU. A TensorRT 11 you installed yourself is used as is; it needs `nvidia-modelopt[onnx]` (torch 2.8 or newer). |
 
-**onnxruntime is not in any extra.** CPU and GPU machines need different packages, so install the one for your machine yourself:
+Your installed `torch` and `torchvision` are pinned during every such install, so they are never replaced. On an older NVIDIA driver, install the torch build that matches it first (from [pytorch.org](https://pytorch.org/get-started/locally/)); mayaku then picks TensorRT to match.
 
-```bash
-pip install onnxruntime        # CPU, Apple Silicon
-pip install onnxruntime-gpu    # NVIDIA GPU (CUDA)
-```
-
-You need onnxruntime to export to ONNX as well as to run an ONNX model. After writing the file, `mayaku export onnx` runs it once with onnxruntime to check its outputs against the PyTorch model.
+To install runtimes yourself (offline machines, locked environments), set `MAYAKU_AUTOINSTALL=0`. A missing runtime then fails with the exact `pip install` command.
 
 ## Check the installation
 

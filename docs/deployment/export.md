@@ -30,12 +30,14 @@ det = predictor("photo.jpg", conf=0.25)
 
 ## Targets
 
-| Target | File | Precisions (first is the default) | Runs on | Install |
-|---|---|---|---|---|
-| `onnx` | `.onnx` | `fp32`, `int8` | onnxruntime: CPU, or CUDA with `onnxruntime-gpu` | `pip install "mayaku[onnx]" onnxruntime` |
-| `coreml` | `.mlpackage` | `fp16`, `fp32`, `int8` | Apple devices: Neural Engine, GPU, CPU | `pip install "mayaku[coreml]"` |
-| `openvino` | `.xml` + `.bin` | `fp32`, `fp16`, `int8` | Intel CPUs, integrated GPUs, NPUs | `pip install "mayaku[openvino]"` |
-| `tensorrt` | `.engine` | `fp16`, `int8`, `fp32` | NVIDIA GPUs | `pip install "mayaku[tensorrt]"` |
+| Target | File | Precisions (first is the default) | Runs on |
+|---|---|---|---|
+| `onnx` | `.onnx` | `fp32`, `int8` | onnxruntime: CPU, or CUDA with `onnxruntime-gpu` |
+| `coreml` | `.mlpackage` | `fp16`, `fp32`, `int8` | Apple devices: Neural Engine, GPU, CPU |
+| `openvino` | `.xml` + `.bin` | `fp32`, `fp16`, `int8` | Intel CPUs, integrated GPUs, NPUs |
+| `tensorrt` | `.engine` | `fp16`, `int8`, `fp32` | NVIDIA GPUs |
+
+Each target's runtime is installed the first time it is needed (see [Installation](/mayaku/installation/)).
 
 Choose a precision with `--precision`:
 
@@ -71,7 +73,7 @@ path = predictor.export("coreml", "model_int8.mlpackage", precision="int8")
 The exported model contains only five operations: 1×1 and 3×3 convolutions, ReLU, addition, nearest-neighbor upsampling, and 3×3 max-pooling. There are no custom operators, attention or deformable convolutions, so any runtime that supports these ops can run it. Export asserts this on every ONNX file it writes.
 
 - **Fixed input size.** The input is one image (batch 1) at the model's canvas, `(1, 3, H, W)`. Find the canvas in `predictor.canvas` or in `canvas_hw` in the embedded metadata. `predictor.batch([...])` on an exported model runs the images one at a time.
-- **Input.** ONNX, OpenVINO and TensorRT take a float32 tensor named `images`, RGB, values scaled to 0–1, already letterboxed (see [Prediction](/mayaku/deployment/prediction/#preprocessing)). Core ML takes an 8-bit RGB image and does the 1/255 scaling inside the model.
+- **Input.** ONNX, OpenVINO and TensorRT take a float32 tensor named `images`, planar RGB, values scaled to 0–1, already letterboxed (see [Prediction](/mayaku/deployment/prediction/#preprocessing)). Core ML takes an 8-bit image and does the 1/255 scaling inside the model. These describe the graph itself; Mayaku's own predictors take BGR images and convert them for you.
 - **Outputs are raw feature maps,** not boxes: per-level class logits (`cls0`, `cls1`, `cls2`) and box distributions (`box0`, `box1`, `box2`), plus the mask, keypoint or angle maps for those tasks. The sigmoid, box decoding, score threshold, NMS, mask assembly and keypoint refinement run on the host. Mayaku's predictors do this for you.
 
 ### Running without Mayaku
@@ -136,5 +138,5 @@ mayaku export coreml   best.pt --precision int8 --output model_int8.mlpackage
 
 - Build the engine **on the machine that will serve it.** An engine is tied to the GPU model and the TensorRT version it was built with.
 - Building needs a CUDA GPU. Export fails with `building a TensorRT engine needs a CUDA GPU` otherwise.
-- TensorRT 10 and 11 are supported. TensorRT 11 builds `fp16` and `int8` engines from an fp16 ONNX graph produced by NVIDIA ModelOpt, which `mayaku[tensorrt]` installs. If it is missing, export fails with `install NVIDIA ModelOpt: pip install 'nvidia-modelopt[onnx]'`.
+- TensorRT 10 and 11 are supported. TensorRT 11 builds `fp16` and `int8` engines from an fp16 ONNX graph produced by NVIDIA ModelOpt, which is installed with it when needed.
 - `from_pretrained("model.engine")` runs on the GPU and keeps outputs there, so post-processing also runs on the GPU.

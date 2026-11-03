@@ -208,7 +208,7 @@ The defaults are the recipe Mayaku is tuned with. The fields you are most likely
 | Field | Default | Meaning |
 |---|---|---|
 | `train.epochs` | `125` (`100` when fine-tuning) | Number of passes over the training set. |
-| `train.batch` | `16` | Images per step, across all GPUs. Lower it if you run out of memory. |
+| `train.batch` | `8` | Images per step, across all GPUs. Fits every tier on a 12 GB GPU; raise it on bigger or several GPUs. |
 | `train.lr` | `0.01` | Peak learning rate. It warms up over `train.warmup_epochs` (3), then follows a cosine down to `lr × train.lr_final_frac`. |
 | `train.optimizer` | `sgd` | `sgd`, `adamw` or `musgd`. |
 | `train.aug.mosaic` | `1.0` | Probability of a four-image mosaic. |
@@ -216,7 +216,7 @@ The defaults are the recipe Mayaku is tuned with. The fields you are most likely
 | `train.amp` | `true` | Mixed precision on CUDA. |
 | `dataloader.num_workers` | `8` | Image-loading processes. |
 
-**Batch size and gradient accumulation.** Gradients are accumulated until about 64 images (`train.lr_ref_batch`) have been seen before each optimizer step, so `train.lr` means the same thing at any batch size. At `batch: 16` each step accumulates 4 batches. Lowering `train.batch` to fit in memory does not require changing the learning rate.
+**Batch size and gradient accumulation.** Gradients are accumulated until about 64 images (`train.lr_ref_batch`) have been seen before each optimizer step, so `train.lr` means the same thing at any batch size. At the default `batch: 8` each step accumulates 8 batches. Lowering `train.batch` to fit in memory does not require changing the learning rate.
 
 **The final stage.** The last `train.final_frac` of the epochs (16% from scratch, 20% when fine-tuning) train without mosaic or scale and translate jitter, on images that look like the ones the model will see in use. The log announces it: `epoch 80: mosaic off, final stage ...`.
 
@@ -262,7 +262,7 @@ mayaku train --weights mayaku-m-det --num-gpus 4 \
 ```
 
 - One process runs per GPU.
-- `train.batch` is the **total** batch across GPUs, so the recipe trains the same on 1 GPU or 8: with `batch: 32` on 4 GPUs, each GPU takes 8 images per step. The batch must divide evenly by the GPU count, otherwise training stops with `train.batch 16 does not split over 3 GPUs; use a multiple of 3`.
+- `train.batch` is the **total** batch across GPUs, so the recipe trains the same on 1 GPU or 8: with `batch: 32` on 4 GPUs, each GPU takes 8 images per step. The batch must divide evenly by the GPU count, otherwise training stops with `train.batch 8 does not split over 3 GPUs; use a multiple of 3`.
 - BatchNorm statistics are synchronized across GPUs (`train.sync_bn: true`), so the run matches its single-GPU equivalent.
 - Only the first process evaluates, logs and writes files.
 - MPS (Apple Silicon) does not support multiple devices.

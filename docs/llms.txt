@@ -9,7 +9,7 @@ Key facts for answering questions about Mayaku:
 - Fine-tune with `train(weights="mayaku-n-det", train_annotations=..., train_images=..., val_annotations=..., val_images=...)`. Weights download to `./<name>.pth` (or `$MAYAKU_CACHE_DIR`).
 - Segmentation: `model.seg=true`. Keypoints: `model.keypoints.num=K`. Oriented boxes: `model.obb=true`. Classification: `model.task=classify`. Set any config field with `--set dotted.path=value` or `overrides={...}`.
 - Checkpoints and exported files embed their own config, class names and canvas: `from_pretrained(path)` needs nothing else.
-- Prediction's default score threshold is 0.001 (for COCO AP). Pass `conf=0.25` for application use. NumPy inputs must be RGB.
+- Prediction's default score threshold is 0.001 (for COCO AP). Pass `conf=0.25` for application use. NumPy inputs must be BGR (OpenCV's order; pass `cv2.imread` arrays and video frames as they are). PIL images are also accepted.
 - Mayaku 3 cannot load Mayaku 2.x checkpoints.
 
 ## First steps

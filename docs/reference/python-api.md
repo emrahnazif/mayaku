@@ -77,7 +77,7 @@ Both have the same interface. See [Prediction](/mayaku/deployment/prediction/).
 
 | Member | Meaning |
 |---|---|
-| `__call__(image, conf=None)` | One image (path, or `(H, W, 3)` RGB `uint8` array) → `Detections`, or `Classification` for a classifier. `conf` overrides the recorded score threshold. |
+| `__call__(image, conf=None)` | One image (path, PIL image, or `(H, W, 3)` BGR `uint8` array, OpenCV's order) → `Detections`, or `Classification` for a classifier. `conf` overrides the recorded score threshold. |
 | `batch(images, conf=None)` | A list of images → a list of results. |
 | `class_names` | `list[str]` |
 | `canvas` | `(height, width)` input size |

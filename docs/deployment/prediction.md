@@ -45,16 +45,15 @@ det = predictor(image, conf=None)            # one image -> Detections (or Class
 dets = predictor.batch([img1, img2], conf=None)   # several images in one pass -> list
 ```
 
-`image` is either of these:
+`image` is any of these:
 
 - **A file path** (`str` or `pathlib.Path`), read with OpenCV.
-- **A NumPy array of shape (H, W, 3) in RGB order.** `uint8` is expected. Other types are clipped to 0–255 and converted.
+- **A NumPy array of shape (H, W, 3) in BGR order,** OpenCV's order, as `cv2.imread` and `cv2.VideoCapture` give it. Pass OpenCV frames as they are. `uint8` is expected. Other types are clipped to 0–255 and converted.
+- **A PIL image.** Its colors are known from its type, so pass it as it is: `predictor(pil_image)`.
 
-> **Note:** OpenCV frames are BGR. Convert them before passing: `predictor(frame[:, :, ::-1])` or `predictor(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))`. A file path needs no conversion.
+> **Note:** a NumPy array that holds RGB (from PIL via `np.asarray`, imageio, or matplotlib) must be reversed first: `predictor(rgb[:, :, ::-1])`. Passing the PIL image itself avoids this.
 
-From PIL: `predictor(np.asarray(pil_image.convert("RGB")))`.
-
-`batch` takes a list of paths and arrays, which may be mixed and of different sizes, and runs them as one batch on the device. That is faster per image than calling the predictor in a loop.
+`batch` takes a list of paths, arrays and PIL images, which may be mixed and of different sizes, and runs them as one batch on the device. That is faster per image than calling the predictor in a loop.
 
 ### The score threshold
 
@@ -128,7 +127,7 @@ while True:
     ok, frame = cap.read()
     if not ok:
         break
-    det = predictor(frame[:, :, ::-1], conf=0.3)       # BGR -> RGB
+    det = predictor(frame, conf=0.3)                   # OpenCV frames are BGR, as expected
     for (x1, y1, x2, y2), label in zip(det.boxes.int().tolist(), det.labels.tolist()):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, predictor.class_names[label], (x1, y1 - 4),
@@ -169,6 +168,6 @@ Every predictor, every exported runtime, and training itself prepare images the 
 
 1. Resize to fit the canvas, keeping the aspect ratio (bilinear interpolation).
 2. Pad the rest of the canvas with gray (value 114), keeping the image centered.
-3. RGB channel order, scale pixel values by 1/255.
+3. Feed the network planar RGB channels scaled by 1/255. (Mayaku's own predictors take BGR images and reverse the channels in the same step.)
 
 Results are mapped back through the same resize and padding, so coordinates are always in the original image. This recipe is recorded in `predictor.sidecar["preprocess"]`. Implement exactly this if you write your own runtime around an exported model.

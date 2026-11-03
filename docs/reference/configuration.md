@@ -118,7 +118,7 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | Field | Default | Meaning |
 |---|---|---|
 | `train.epochs` | `125` | Passes over the training set. Auto-config sets `100` when fine-tuning. Shortcut: `--epochs`. |
-| `train.batch` | `16` | Images per step across all GPUs. Must divide by the GPU count. |
+| `train.batch` | `8` | Images per step across all GPUs. Must divide by the GPU count. 8 fits every tier on a 12 GB GPU; raise it on bigger or several GPUs. |
 | `train.optimizer` | `sgd` | `sgd` (Nesterov), `adamw`, or `musgd` (SGD mixed with an orthogonalized Muon step on hidden convolutions). |
 | `train.lr` | `0.01` | Peak learning rate. |
 | `train.lr_final_frac` | `0.01` | The final learning rate as a fraction of `lr`, reached by a cosine schedule. |

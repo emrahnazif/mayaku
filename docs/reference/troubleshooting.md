@@ -19,17 +19,13 @@ pip install -e .
 
 Until then, `python -m mayaku.cli ...` runs the same program.
 
-### `ModuleNotFoundError: No module named 'onnxruntime'` (or `onnx`, `coremltools`, `openvino`, `tensorrt`, `modelopt`)
+### `... is not installed (or too old); run: pip install ...`
 
-Export and exported-model runtimes are optional. Install the one you need:
+An export runtime is missing and `MAYAKU_AUTOINSTALL=0` stopped mayaku from installing it. Run the `pip install` command in the message, or unset `MAYAKU_AUTOINSTALL`.
 
-| Missing | Install |
-|---|---|
-| `onnx` | `pip install "mayaku[onnx]"` |
-| `onnxruntime` | `pip install onnxruntime` (CPU) or `pip install onnxruntime-gpu` (CUDA). Needed both to export ONNX and to run it. |
-| `coremltools` | `pip install "mayaku[coreml]"` |
-| `openvino` | `pip install "mayaku[openvino]"` |
-| `tensorrt`, `modelopt` | `pip install "mayaku[tensorrt]"` (Linux with CUDA) |
+### `installing ... failed (pip exit N)`
+
+mayaku tried to install an export runtime and pip failed, usually because the machine is offline or the environment is read-only. The message ends with the command to run yourself.
 
 ## Loading weights
 
@@ -122,7 +118,7 @@ A config field name is misspelled or doesn't exist. The error names the path, fo
 
 ## Multiple GPUs
 
-### `train.batch 16 does not split over 3 GPUs; use a multiple of 3`
+### `train.batch 8 does not split over 3 GPUs; use a multiple of 3`
 
 `train.batch` is the total across GPUs and must divide evenly. Change `--set train.batch=...` or the GPU count.
 
@@ -142,7 +138,7 @@ Under `torchrun`, set the process count with `--nproc-per-node` and don't pass `
 
 ### CUDA out of memory
 
-Lower `train.batch` (for example `--set train.batch=8`). The learning rate doesn't need to change, because gradients are accumulated to the same effective batch. If that isn't enough, lower `--size-budget`. Segmentation with `model.mask_stride=4` needs more memory than the default `8`.
+Lower `train.batch` (for example `--set train.batch=4`). The learning rate doesn't need to change, because gradients are accumulated to the same effective batch. If that isn't enough, lower `--size-budget`. Segmentation with `model.mask_stride=4` needs more memory than the default `8`.
 
 ### Training is slow and the GPU is underused
 
@@ -168,15 +164,15 @@ The default score threshold is `0.001`, the value used for COCO AP. Pass a thres
 
 ### Wrong colors or noticeably worse results on camera frames
 
-NumPy images must be RGB. OpenCV frames are BGR. Pass `frame[:, :, ::-1]`.
+NumPy images must be BGR, OpenCV's order. Pass OpenCV frames as they are. An array that holds RGB (from PIL via `np.asarray`, imageio, or matplotlib) must be reversed: `rgb[:, :, ::-1]`, or pass the PIL image itself.
 
 ### `cannot read image PATH`
 
 OpenCV can't open the file. It is missing, not an image, or in a format OpenCV doesn't decode.
 
-### `expected an (H, W, 3) RGB array or an image path; got shape ...`
+### `expected an image path, a PIL image or an (H, W, 3) BGR array; got an array of shape ...`
 
-Grayscale and RGBA arrays aren't accepted. Convert them: `np.stack([gray] * 3, -1)` or `rgba[:, :, :3]`.
+Grayscale and four-channel arrays aren't accepted. Convert them to three-channel BGR: `cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)`, or `cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)` for an OpenCV image with alpha. For an RGBA image from PIL, pass the PIL image itself.
 
 ### `graph input (...) disagrees with the sidecar canvas (...)`
 
@@ -203,10 +199,6 @@ The model was trained with `model.qat_activations: affine`, or is an older QAT c
 ### `building a TensorRT engine needs a CUDA GPU`
 
 TensorRT engines can only be built on a machine with an NVIDIA GPU, ideally the one that will serve the model.
-
-### `TensorRT 11 builds fp16 and int8 from an fp16 ONNX graph; install NVIDIA ModelOpt`
-
-Install it: `pip install "nvidia-modelopt[onnx]"`, which `mayaku[tensorrt]` includes.
 
 ### `... outputs differ from the Torch model by X% RMS (tolerance Y%)`
 
