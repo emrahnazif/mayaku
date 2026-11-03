@@ -12,7 +12,7 @@ Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on CU
 Silicon or CPU, and every model exports to a graph of just five operations that runs on
 any runtime, including true int8 on NPUs.
 
-![Mean RF100-VL AP against parameter count: mayaku-n 58.3 AP at 5.18M, YOLO26s 57.8 at 9.5M, RF-DETR nano 57.4 at 30.5M, YOLO26n 54.8 at 2.4M](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_params.png)
+![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.3 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
 
 - **Highest fine-tune AP at nano size.** Across all 100 datasets of
   [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.3 AP**: ahead of RF-DETR nano
@@ -32,7 +32,7 @@ pip install mayaku
 
 That is all. The runtime for an export target (onnxruntime, OpenVINO, Core ML, TensorRT) is
 installed the first time you export to it or load one of its files, matched to your machine and
-never replacing your torch. Set `MAYAKU_AUTOINSTALL=0` to install them yourself instead.
+never replacing your torch.
 
 ## Quick start
 
@@ -86,7 +86,7 @@ The gain is largest on small objects, where nano detectors usually struggle:
 
 > **Protocol.** AP is COCO AP@[.50:.95], best checkpoint on each dataset's valid split,
 > averaged over all 100 datasets. Parameters are deploy (fused) counts as published by each
-> library. Mayaku trains at 800 px; the others at their defaults.
+> library. Every library trains at its own defaults.
 
 ## Deployment
 
@@ -102,9 +102,8 @@ That one constraint is where the rest comes from:
 
 - **Speed headroom.** Each layer is the fastest kind of layer on every chip, so the network
   is cheap per unit of compute.
-- **Higher resolution at nano latency.** That headroom pays for an 800 px input where
-  others use 640 or 384, and resolution is what small objects need: AP<sub>S</sub> 33.5
-  against 28.3 for YOLO26n and 29.6 for RF-DETR nano.
+- **Higher resolution at nano latency.** That headroom pays for an 800 px input, and
+  resolution is what small objects need.
 - **True int8, on any accelerator.** Nothing in the graph needs floating point (below).
 - **The whole graph on the NPU.** On Apple silicon every layer of the network runs on the
   Neural Engine (fp16); nothing falls back to the CPU or GPU halfway through.
@@ -113,20 +112,15 @@ That one constraint is where the rest comes from:
 
 ### Latency
 
-![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.3 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
-
-*End to end* is a decoded image in memory to final boxes in its pixels, batch 1, with each
-library's own pre- and post-processing; each model at its default input size. On the M1 Max,
-mayaku-n at 800 px is faster than YOLO26n at 640 px; on the RTX 3060, at 640 px it matches
-YOLO26n (1.79 ms), and 800 px costs under a millisecond more.
+In the plot at the top, *end to end* is a decoded image in memory to final boxes in its
+pixels, batch 1, with each library's own pre- and post-processing; each model at its
+default input size.
 
 ### True int8
 
 Because every layer is a plain convolution with ReLU, the whole network quantizes. On
-TensorRT, Mayaku compiles to int8 everywhere except the final output projections; YOLO26n
-keeps 13 convolutions and 51 other layers in fp16, so it can't run on int8-only hardware.
-Models train quantization-aware by default, which keeps the int8 model within about
-**0.3 AP** of fp16.
+TensorRT, Mayaku compiles to int8 everywhere except the final output projections.
+Models train quantization-aware by default.
 
 ```bash
 mayaku export tensorrt best.pt --precision int8 --output model.engine
