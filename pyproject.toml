@@ -35,7 +35,7 @@ dependencies = [
   # every export goes through ONNX; the deployment runtimes (onnxruntime,
   # OpenVINO, Core ML, TensorRT) are installed when first used, see
   # mayaku/utils/requirements.py
-  "onnx>=1.16",
+  "onnx>=1.23.2",
 ]
 
 [dependency-groups]
