@@ -138,8 +138,8 @@ frames from `cv2.VideoCapture` go in as they are, with no conversion.
 |---|---|---:|---:|---|
 | `mayaku-n-det` | detection | 5.2M | 6.7 | released |
 | `mayaku-n-seg` | detection + instance masks | 5.3M | 7.1 | released |
-| `mayaku-m-det` | detection | 32.4M | 46.3 | finishing training |
-| `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | finishing training |
+| `mayaku-m-det` | detection | 32.4M | 46.3 | released |
+| `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | released |
 
 All are pretrained on Objects365; detection and segmentation read COCO JSON.
 `mayaku download --list` shows what is hosted. 

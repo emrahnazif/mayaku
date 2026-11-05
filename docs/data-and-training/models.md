@@ -13,8 +13,8 @@ Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pre
 |---|---|---|---|
 | `mayaku-n-det` | nano | Object detection | released |
 | `mayaku-n-seg` | nano | Instance segmentation | released |
-| `mayaku-m-det` | medium | Object detection | finishing training |
-| `mayaku-m-seg` | medium | Instance segmentation | finishing training |
+| `mayaku-m-det` | medium | Object detection | released |
+| `mayaku-m-seg` | medium | Instance segmentation | released |
 
 All are pretrained on Objects365. The pattern is `mayaku-<size>-<task>`. To see what is currently hosted:
 

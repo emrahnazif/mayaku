@@ -76,8 +76,8 @@ RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, spo
 |---|---|---:|---:|---|
 | `mayaku-n-det` | detection | 5.2M | 6.7 | released |
 | `mayaku-n-seg` | detection + instance masks | 5.3M | 7.1 | released |
-| `mayaku-m-det` | detection | 32.4M | 46.3 | finishing training |
-| `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | finishing training |
+| `mayaku-m-det` | detection | 32.4M | 46.3 | released |
+| `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | released |
 
 All are pretrained on Objects365 and fine-tune from COCO JSON. Pass a name and Mayaku downloads the weights the first time.
 
