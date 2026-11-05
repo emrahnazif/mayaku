@@ -120,3 +120,13 @@ def test_sidecars_before_the_activation_scheme_read_back_affine() -> None:
     old = dict(s, config=dict(s["config"], model={k: v for k, v in s["config"]["model"].items()
                                                   if k != "qat_activations"}))
     assert sidecar_config(old).model.qat_activations == "affine"
+
+
+def test_sidecars_with_the_warmup_floor_still_read() -> None:
+    """The hosted v3 checkpoints were written while `train.warmup_iters_min`
+    existed; the field is gone, and reading them must not fail validation."""
+    from mayaku.utils.checkpoint import sidecar_config
+    s = _sidecar(_cfg(tier="n"))
+    old = dict(s, config=dict(s["config"], train=dict(s["config"]["train"],
+                                                      warmup_iters_min=100)))
+    assert sidecar_config(old).model.tier == "n"

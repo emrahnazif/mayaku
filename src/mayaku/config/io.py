@@ -22,6 +22,7 @@ import yaml
 from mayaku.config.schemas import MayakuConfig
 
 __all__ = [
+    "drop_retired",
     "dump_yaml",
     "load_yaml",
     "merge_overrides",
@@ -29,6 +30,22 @@ __all__ = [
     "read_yaml",
     "to_yaml_string",
 ]
+
+
+# Fields the schema no longer has, as (section, field). Configs written while
+# they existed -- a run's config.yaml, a checkpoint's sidecar -- still carry
+# them; they are dropped on read so those files keep loading, while any other
+# unknown key still fails validation.
+RETIRED = (("train", "warmup_iters_min"),)
+
+
+def drop_retired(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of the config mapping `raw` without the `RETIRED` fields."""
+    out = dict(raw)
+    for section, field in RETIRED:
+        if isinstance(out.get(section), Mapping) and field in out[section]:
+            out[section] = {k: v for k, v in out[section].items() if k != field}
+    return out
 
 
 def load_yaml(path: str | Path) -> MayakuConfig:
@@ -51,7 +68,8 @@ def read_yaml(path: str | Path) -> tuple[dict[str, Any], MayakuConfig]:
         raise ValueError(
             f"YAML at {path} must be a mapping at the top level; got {type(raw).__name__}"
         )
-    return dict(raw), MayakuConfig.model_validate(dict(raw))
+    raw = drop_retired(raw)
+    return raw, MayakuConfig.model_validate(raw)
 
 
 def dump_yaml(config: MayakuConfig, path: str | Path) -> None:

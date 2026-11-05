@@ -108,3 +108,14 @@ def test_load_yaml_rejects_a_non_mapping(tmp_path: Path) -> None:
     p.write_text("- 1\n- 2\n")
     with pytest.raises(ValueError, match="mapping"):
         load_yaml(p)
+
+
+def test_load_yaml_drops_retired_fields_only(tmp_path: Path) -> None:
+    """A run's config.yaml written while `train.warmup_iters_min` existed
+    still loads; an unknown key that was never a field still fails."""
+    p = tmp_path / "old.yaml"
+    p.write_text("train:\n  epochs: 7\n  warmup_iters_min: 100\n")
+    assert load_yaml(p).train.epochs == 7
+    p.write_text("train:\n  warmup_iters_minimum: 100\n")
+    with pytest.raises(ValidationError):
+        load_yaml(p)

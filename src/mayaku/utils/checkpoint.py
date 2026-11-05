@@ -149,10 +149,12 @@ def read_deploy_checkpoint(
 def sidecar_config(sidecar: Mapping[str, Any]) -> MayakuConfig:
     """The `MayakuConfig` a sidecar records. One written before
     `model.qat_activations` existed trained affine activation ranges, so it
-    reads back as affine, not as today's symmetric default."""
+    reads back as affine, not as today's symmetric default. Retired fields
+    are dropped (`mayaku.config.io.drop_retired`)."""
     from mayaku.config import MayakuConfig
+    from mayaku.config.io import drop_retired
 
-    cfg = dict(sidecar["config"])
+    cfg = drop_retired(sidecar["config"])
     model = dict(cfg.get("model") or {})
     if model.get("qat") and "qat_activations" not in model:
         model["qat_activations"] = "affine"
