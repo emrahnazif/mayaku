@@ -9,10 +9,10 @@ Two kinds of override, both skipped for any field the user set explicitly:
   carry no masks (a segmentation checkpoint fine-tuned on box-only data).
 * **The fine-tune recipe**, applied only when training starts from pretrained
   weights and the dataset has at least `MIN_IMAGES_FOR_AUTO_CONFIG` images:
-  run length, the clean final stage, the assigner and, on small datasets,
-  mosaic strength. Everything else, the learning rate and warmup included,
-  stays the recipe's own (`mayaku.engine.trainer.Recipe`). A from-scratch run
-  keeps its recipe.
+  run length, the clean final stage, the assigner, the optimizer and its
+  learning rate (by tier, and by class count for AdamW) and, on small
+  datasets, mosaic strength. Everything else stays the recipe's own
+  (`mayaku.engine.trainer.Recipe`). A from-scratch run keeps its recipe.
 
 With ``auto_config.enabled`` False nothing is tuned, but a model cannot be
 built without a class count and a canvas: left unset, they are filled plainly
@@ -41,10 +41,13 @@ if TYPE_CHECKING:
 
 __all__ = ["AUTO_PATHS", "MIN_IMAGES_FOR_AUTO_CONFIG", "apply_auto_config", "collect_set_paths"]
 
+#: The optimizer and its learning rate, set together or not at all: a user who
+#: sets either keeps the recipe's other rather than a mix.
+OPTIMIZER_PATHS: Final = frozenset({"train.optimizer", "train.lr"})
+
 #: Every dotted config path auto-config may set. Anything else -- the tier,
-#: the heads, QAT, the loss, the optimizer -- belongs to the user or the
-#: checkpoint.
-AUTO_PATHS: Final = frozenset({
+#: the heads, QAT, the loss -- belongs to the user or the checkpoint.
+AUTO_PATHS: Final = OPTIMIZER_PATHS | frozenset({
     "model.num_classes",
     "model.seg",
     "model.keypoints.names",
@@ -69,6 +72,13 @@ FINETUNE_EPOCHS: Final = 100
 # the task-aligned assigner runs from the first epoch. Both measured better
 # than the from-scratch values (0.16, 5 ATSS epochs) for warm starts.
 FINETUNE_FINAL_FRAC: Final = 0.2
+
+# Tiers that fine-tune with AdamW at ADAMW_LR / (4 + classes), the fit
+# Ultralytics' automatic optimizer choice uses; the rest keep the recipe's SGD.
+# Measured paired on small datasets: nano gains about half an AP from AdamW
+# (44 datasets), medium loses about as much (24); s and l are unmeasured.
+ADAMW_TIERS: Final = frozenset({"n"})
+ADAMW_LR: Final = 0.01
 
 # (upper exclusive image count, mosaic probability) for small datasets, carried
 # over from mayaku 2.x; larger ones keep the recipe's own augmentation.
@@ -109,13 +119,16 @@ def _required(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
     return out
 
 
-def _finetune(num_images: int) -> dict[str, Any]:
-    """The fine-tune recipe for a dataset of this size; empty below
-    `MIN_IMAGES_FOR_AUTO_CONFIG`."""
+def _finetune(num_images: int, nc: int, tier: str, optimizer: bool = True) -> dict[str, Any]:
+    """The fine-tune recipe for a dataset of this size and class count on
+    this tier, the optimizer included unless `optimizer` is False; empty
+    below `MIN_IMAGES_FOR_AUTO_CONFIG`."""
     if num_images < MIN_IMAGES_FOR_AUTO_CONFIG:
         return {}
     train: dict[str, Any] = {"epochs": FINETUNE_EPOCHS, "final_frac": FINETUNE_FINAL_FRAC,
                              "assigner_warmup": 0}
+    if optimizer and tier in ADAMW_TIERS:
+        train |= {"optimizer": "adamw", "lr": round(ADAMW_LR / (4 + nc), 6)}
     mosaic = next((m for upper, m in _MOSAIC_BY_SIZE if num_images < upper), None)
     if mosaic is not None:
         train["aug"] = {"mosaic": mosaic}
@@ -133,7 +146,10 @@ def apply_auto_config(cfg: MayakuConfig, coco: CocoLabels, user_set_paths: Colle
     """
     overrides: dict[str, Any] = {}
     if cfg.auto_config.enabled:
-        overrides = _structural(coco, cfg) | (_finetune(len(coco.shapes)) if finetune else {})
+        tuned = (_finetune(len(coco.shapes), len(coco.cat_ids), cfg.model.tier,
+                           optimizer=not OPTIMIZER_PATHS & set(user_set_paths))
+                 if finetune else {})
+        overrides = _structural(coco, cfg) | tuned
         overrides = _filter_unset(overrides, user_set_paths)
     new = merge_overrides(cfg, overrides)
     required = _required(coco, new)

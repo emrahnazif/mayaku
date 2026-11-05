@@ -9,7 +9,7 @@ from mayaku.config import KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.coco import load_coco
 from mayaku.health import health_check
 from mayaku.tuning import AUTO_PATHS, analyze_dataset, apply_auto_config, collect_set_paths
-from mayaku.tuning.recipe import FINETUNE_EPOCHS
+from mayaku.tuning.recipe import ADAMW_LR, FINETUNE_EPOCHS
 
 from ._coco_fixture import synthetic_coco
 
@@ -34,9 +34,23 @@ def test_auto_config_fills_structure_and_the_finetune_recipe(coco) -> None:
     assert cfg.model.num_classes == 4 and cfg.input.canvas_hw is not None
     assert cfg.train.epochs == FINETUNE_EPOCHS and cfg.train.final_epochs == 20
     assert cfg.train.assigner_warmup == 0
-    # the learning rate and warmup stay the recipe's own
-    assert cfg.train.lr == MayakuConfig().train.lr
+    # the warmup length stays the recipe's own
     assert cfg.train.warmup_epochs == MayakuConfig().train.warmup_epochs
+
+
+def test_the_optimizer_follows_the_tier_and_adamw_the_class_count(coco) -> None:
+    n, _ = apply_auto_config(MayakuConfig(), coco)                       # 4 classes
+    assert n.train.optimizer == "adamw" and n.train.lr == pytest.approx(ADAMW_LR / (4 + 4))
+    m, _ = apply_auto_config(MayakuConfig(model=ModelConfig(tier="m")), coco)
+    assert (m.train.optimizer, m.train.lr) == ("sgd", MayakuConfig().train.lr)
+
+
+@pytest.mark.parametrize("raw", [{"train": {"optimizer": "sgd"}}, {"train": {"lr": 0.003}}],
+                         ids=["optimizer", "lr"])
+def test_pinning_the_optimizer_or_lr_keeps_the_recipes_other(coco, raw) -> None:
+    cfg, _ = apply_auto_config(MayakuConfig.model_validate(raw), coco, collect_set_paths(raw))
+    base = MayakuConfig.model_validate(raw).train
+    assert (cfg.train.optimizer, cfg.train.lr) == (base.optimizer, base.lr)
 
 
 @pytest.mark.parametrize("model", [ModelConfig(), ModelConfig(keypoints=KeypointConfig(num=3))],
