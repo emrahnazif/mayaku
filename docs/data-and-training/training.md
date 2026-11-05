@@ -138,11 +138,13 @@ At the start of training, Mayaku fills in the settings you left unset from your 
 | `train.final_frac` | `0.2`: the last 20% of epochs train without mosaic | Fine-tuning, 10 or more images |
 | `train.assigner_warmup` | `0` | Fine-tuning, 10 or more images |
 | `train.aug.mosaic` | `0.1` under 500 images, `0.2` under 2,000, `0.3` under 5,000 | Fine-tuning; 5,000 images or more keep `1.0` |
+| `train.optimizer`, `train.lr` | `adamw` at `0.01 / (4 + classes)` for nano; other tiers keep `sgd` at `0.01` | Fine-tuning, 10 or more images |
 
 Rules:
 
 - **Anything you set yourself wins.** A field counts as set when it appears in your YAML, in `overrides` or `--set`, or through `--epochs` / `--size-budget`. Auto-config never touches it.
-- Auto-config never changes the model size, the heads, the loss, the optimizer or the learning rate.
+- Auto-config never changes the model size, the heads or the loss.
+- `train.optimizer` and `train.lr` go together: set either and auto-config leaves both at the recipe's values.
 - `--set auto_config.enabled=false` turns it off. The class count and canvas are still filled in, because a model can't be built without them, but plainly: the data's class count and a square canvas at the size budget.
 - If you set `model.num_classes` and it disagrees with the data, training stops with an error.
 

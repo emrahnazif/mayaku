@@ -119,18 +119,17 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 |---|---|---|
 | `train.epochs` | `125` | Passes over the training set. Auto-config sets `100` when fine-tuning. Shortcut: `--epochs`. |
 | `train.batch` | `8` | Images per step across all GPUs. Must divide by the GPU count. 8 fits every tier on a 12 GB GPU; raise it on bigger or several GPUs. |
-| `train.optimizer` | `sgd` | `sgd` (Nesterov), `adamw`, or `musgd` (SGD mixed with an orthogonalized Muon step on hidden convolutions). |
-| `train.lr` | `0.01` | Peak learning rate. |
+| `train.optimizer` | `sgd` | `sgd` (Nesterov), `adamw`, or `musgd` (SGD mixed with an orthogonalized Muon step on hidden convolutions). Auto-config picks `adamw` for nano fine-tunes. |
+| `train.lr` | `0.01` | Peak learning rate. Auto-config sets `0.01 / (4 + classes)` when it picks `adamw`. |
 | `train.lr_final_frac` | `0.01` | The final learning rate as a fraction of `lr`, reached by a cosine schedule. |
-| `train.lr_ref_batch` | `64` | Gradients are accumulated over about this many images per optimizer step, whatever `batch` is, so `lr` doesn't depend on `batch`. Weight decay is scaled to match. |
+| `train.lr_ref_batch` | `64` | Images per optimizer step: gradients of `lr_ref_batch / batch` micro-batches are summed into one step, so `lr` means the same at any `batch`. During warmup a step starts at one micro-batch and grows to the full count, so small datasets learn from the first epoch. Weight decay is scaled to match. |
 | `train.momentum` | `0.937` | SGD and MuSGD momentum. |
 | `train.beta1` | `0.9` | AdamW beta1. |
 | `train.muon_mix` | `0.5` | MuSGD only: the share of each hidden-convolution step taken along the orthogonalized direction. `0` is plain SGD. |
 | `train.weight_decay` | `0.0005` | Applied to weights only, not to normalization layers or biases. |
-| `train.warmup_epochs` | `3.0` | Learning-rate warmup length in epochs. |
-| `train.warmup_iters_min` | `100` | Minimum warmup steps, so tiny datasets still warm up. |
+| `train.warmup_epochs` | `3.0` | Warmup length in epochs: the learning-rate ramp, and the ramp of micro-batches per step (see `lr_ref_batch`). |
 | `train.warmup_momentum_start` | `0.8` | Momentum at the start of warmup. |
-| `train.warmup_bias_lr_start` | `0.1` | Bias learning rate at the start of warmup. It ramps down to `lr`. |
+| `train.warmup_bias_lr_start` | `0.1` | Bias learning rate at the start of warmup. It ramps down to `lr`. SGD and MuSGD only: under `adamw` biases warm up from `0` like every other weight. |
 | `train.seed` | `0` | Random seed. |
 | `train.amp` | `true` | Mixed-precision training. Applies on CUDA only. |
 | `train.sync_bn` | `true` | Multi-GPU only: BatchNorm statistics over the whole batch rather than each GPU's share. |

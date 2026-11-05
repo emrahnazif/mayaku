@@ -85,6 +85,8 @@ For a 300-image dataset of 4:3 photos with 3 classes, the log starts like this:
 [mayaku.train] auto-config train.aug.mosaic: 1.0 -> 0.1
 [mayaku.train] auto-config train.epochs: 125 -> 100
 [mayaku.train] auto-config train.final_frac: 0.16 -> 0.2
+[mayaku.train] auto-config train.lr: 0.01 -> 0.001429
+[mayaku.train] auto-config train.optimizer: sgd -> adamw
 [mayaku.train] tier n, 3 classes, canvas 672x896, 100 epochs, batch 8 on cuda -> runs/mayaku-n-det/train
 ```
 
