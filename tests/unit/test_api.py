@@ -18,8 +18,7 @@ from mayaku.utils.checkpoint import read_deploy_checkpoint
 from ._coco_fixture import synthetic_coco
 
 # A run small enough for CPU CI: 96-pixel canvas, two epochs, no workers.
-FAST = {"train": {"batch": 4, "lr_ref_batch": 4, "recalibrate_images": 4,
-                  "warmup_iters_min": 2},
+FAST = {"train": {"batch": 4, "lr_ref_batch": 4, "recalibrate_images": 4},
         "dataloader": {"num_workers": 0}, "model": {"qat": False}}
 
 

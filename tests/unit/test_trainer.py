@@ -46,6 +46,14 @@ def test_warmup_hands_off_to_the_cosine() -> None:
     assert all(abs(g["lr"] - BASE.lr * cosine(BASE, 3)) < 1e-12 for g in opt.param_groups)
 
 
+def test_adamw_biases_warm_up_from_zero() -> None:
+    """The SGD bias warmup's high start would be a huge AdamW step."""
+    r = dataclasses.replace(BASE, optimizer="adamw", lr=0.001)
+    opt = build_optimizer(Detector(TINY, 4), r, accumulate=4)
+    set_lr(opt, r, 0, 0, 100)
+    assert [g["lr"] for g in opt.param_groups] == [0.0, 0.0, 0.0]
+
+
 def test_ema_lags_the_model() -> None:
     model = Detector(TINY, 4)
     ema = EMA(model, decay=0.9, tau=1.0)
@@ -68,7 +76,7 @@ def test_tiny_run_learns(tmp_path, qat) -> None:
     batches per update and 36 epochs on 32 images would be 18 steps."""
     r = dataclasses.replace(
         BASE, epochs=36, batch=4, lr_ref_batch=4, lr=0.02,
-        final_frac=0.22, warmup_epochs=1.0, warmup_iters_min=20,
+        final_frac=0.22, warmup_epochs=2.5,
         assigner_warmup=2, amp=False, recalibrate_images=32)
     tr = fixture(tmp_path / "train", n=32, canvas=192, aug=DEFAULT_AUG, seed=3)
     va = fixture(tmp_path / "val", n=32, canvas=192, seed=3)
@@ -97,3 +105,30 @@ def test_ema_int8_ranges_count_as_observed_with_the_live_ones() -> None:
     assert all(o.observed for o in observers(model))
     ema.update()
     assert all(o.observed for o in observers(ema.model))
+
+
+def test_a_step_is_the_same_size_at_any_micro_batch(tmp_path, monkeypatch) -> None:
+    """A step's gradient sums its micro-batches, so its size does not shrink
+    with `batch` (averaging them made it 4x smaller here); BatchNorm makes
+    the two agree only roughly."""
+    norms = {}
+
+    def first_norm(key):
+        real = torch.nn.utils.clip_grad_norm_
+
+        def clip(params, max_norm):
+            n = real(params, max_norm)
+            if key not in norms:
+                norms[key] = float(n)
+            return n
+        return clip
+
+    ds = fixture(tmp_path / "d", n=16, canvas=96, seed=3)
+    for batch in (2, 8):
+        torch.manual_seed(0)
+        model = Detector(TINY, ds.nc, ds.canvas)
+        r = dataclasses.replace(BASE, epochs=1, batch=batch, lr_ref_batch=8, warmup_epochs=0,
+                                amp=False, recalibrate_images=0)
+        monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", first_norm(batch))
+        train(model, ds, None, r, log_every=0, log=lambda *_: None)
+    assert 0.5 < norms[2] / norms[8] < 2.0

@@ -77,10 +77,9 @@ class Recipe:
     muon_mix: float = 0.5
     weight_decay: float = 5e-4
     lr_ref_batch: int = 64          # batch size `lr` is quoted against
-    warmup_epochs: float = 3.0
-    warmup_iters_min: int = 100     # a floor, so a tiny set still warms up
+    warmup_epochs: float = 3.0          # LR warmup, and the ramp of micro-batches per step
     warmup_momentum_start: float = 0.8  # momentum ramps up from this
-    warmup_bias_lr_start: float = 0.1   # bias LR ramps down from this
+    warmup_bias_lr_start: float = 0.1   # SGD/MuSGD bias LR ramps down from this
     # Share of the run, at the end, trained with `final_aug` (the clean stage):
     # 0.16 of 125 epochs is the last 20. See `final_epochs`.
     final_frac: float = 0.16
@@ -212,14 +211,17 @@ def set_lr(opt, r, epoch, it, warmup_iters):
     """The only writer of the learning rate, called every iteration.
 
     Warmup and cosine are one expression rather than an iteration-level ramp
-    racing an epoch-level scheduler. Biases start high and come down,
-    everything else starts at zero and comes up, momentum ramps with them,
-    and past `warmup_iters` the whole thing collapses to the cosine.
+    racing an epoch-level scheduler. Under SGD biases start high and come
+    down; everything else, and every AdamW group (whose normalised steps a
+    high start would blow up), starts at zero and comes up. Momentum ramps
+    with them, and past `warmup_iters` the whole thing collapses to the
+    cosine.
     """
     cos = cosine(r, epoch)
     x = min(it / warmup_iters, 1.0) if warmup_iters else 1.0
+    bias_start = 0.0 if r.optimizer == "adamw" else r.warmup_bias_lr_start
     for g in opt.param_groups:
-        start = r.warmup_bias_lr_start if g["bias"] else 0.0
+        start = bias_start if g["bias"] else 0.0
         g["lr"] = start + x * (r.lr * cos - start)
         if "momentum" in g:
             m0 = r.warmup_momentum_start
@@ -488,7 +490,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         ms_sizes = []
     if ms_sizes and out:
         log("multi-scale training over %s" % ms_sizes)
-    warmup_iters = max(round(r.warmup_epochs * len(loader)), r.warmup_iters_min)
+    warmup_iters = round(r.warmup_epochs * len(loader))
     log_path = os.path.join(out, "log.jsonl") if out else None
     if out and not resume:
         os.makedirs(out, exist_ok=True)
@@ -500,6 +502,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     key, stats = primary(model)
     records, best = [], resume["best"] if resume else {key: -1.0}
     final_start = r.epochs - r.final_epochs
+    pending = 0     # micro-batches in the step being accumulated, across epochs
 
     for epoch in range(start, r.epochs):
         # `>=`, not `==`: a run resumed inside the final stage enters it at once
@@ -526,16 +529,24 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                 s = ms_sizes[torch.randint(len(ms_sizes), (1,)).item()]
                 imgs, targets, masks = rescale_batch(
                     imgs, targets, masks, s, model.cfg.seg, model.cfg.kpt, model.cfg.obb)
-            step = (i + 1) % accumulate == 0
+            # Warmup also ramps the micro-batches per step from 1 up to
+            # `accumulate`, so a small dataset takes real steps from its first
+            # batch rather than one per `lr_ref_batch` images from the start.
+            acc = (accumulate if it >= warmup_iters
+                   else max(1, round(1 + (accumulate - 1) * it / warmup_iters)))
+            pending += 1
+            step = pending >= acc
             # gradients are only exchanged on the micro-batch that steps
             no_sync = fwd.no_sync() if world > 1 and not step else contextlib.nullcontext()
             with no_sync:
                 with torch.amp.autocast("cuda", enabled=amp):
                     loss, parts = crit(fwd(imgs), targets, epoch=epoch, masks=masks)
-                # DDP averages the ranks' gradients; the loss is a sum over
-                # the batch, so the ranks' shares are summed back
-                scaler.scale((loss * world if world > 1 else loss) / accumulate).backward()
+                # summed over the step's micro-batches, not averaged, so `lr`
+                # means the same at any micro-batch size; DDP averages the
+                # ranks' gradients and the per-image sums are summed back
+                scaler.scale(loss * world if world > 1 else loss).backward()
             if step:
+                pending = 0
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), 10.0)
                 scaler.step(opt)

@@ -109,7 +109,7 @@ def tiny_ddp_run(out_dir: str, root: str, ann: str, aux: bool) -> None:
     val = CocoDetection(root, ann, 96, masks=aux, kpt=k) if is_main_process() else None
     torch.manual_seed(0)
     model = Detector(dataclasses.replace(TINY, seg=aux, kpt=k), ds.nc, 96)
-    r = dataclasses.replace(BASE, epochs=2, batch=4, lr_ref_batch=4, warmup_iters_min=2,
+    r = dataclasses.replace(BASE, epochs=2, batch=4, lr_ref_batch=4,
                             recalibrate_images=4, amp=False)
     best, ema, _ = train(model, ds, val, r, out=str(Path(out_dir) / "run"), log_every=0,
                          log=lambda *_: None)
