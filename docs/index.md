@@ -10,11 +10,11 @@ template: docs
 
 Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on NVIDIA GPUs (CUDA), Apple Silicon (MPS) or the CPU, and every model exports to a graph of just five operations that runs on any runtime, including true int8 on NPUs.
 
-![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.3 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
+![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
 
 *End to end* is a decoded image in memory to final boxes in its pixels, batch 1, with each library's own pre- and post-processing; each model at its default input size.
 
-- **Highest fine-tune AP at nano size.** Across all 100 datasets of [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.3 AP**: ahead of RF-DETR nano (57.4, with 6× the parameters), YOLO26s (57.8) and YOLO26n (54.8).
+- **Highest fine-tune AP at nano size.** Across all 100 datasets of [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.9 AP**: ahead of RF-DETR nano (57.4, with 6× the parameters), YOLO26s (57.8) and YOLO26n (54.8).
 - **True int8.** The deploy graph quantizes almost end to end: everything except the final output projections runs in int8. Quantization-aware training is on by default.
 - **Runs and deploys everywhere.** No compiled extensions, no deformable convolutions, no attention. Parity-tested exports to ONNX, Core ML, OpenVINO and TensorRT, whose runtimes install themselves when first needed.
 - **Detection and instance segmentation** with one API and one training loop.
@@ -59,12 +59,12 @@ RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, spo
 
 | Model | Params | Mean AP | AP<sub>S</sub> | AP<sub>M</sub> | AP<sub>L</sub> |
 |---|---:|---:|---:|---:|---:|
-| **mayaku-n** | **5.2M** | **58.3** | **33.5** | **51.4** | 63.9 |
+| **mayaku-n** | **5.2M** | **58.9** | **33.3** | **52.2** | 64.1 |
 | YOLO26s | 9.5M | 57.8 | 32.3 | 50.9 | 63.5 |
 | RF-DETR nano | 30.5M | 57.4 | 29.6 | 49.5 | 65.6 |
 | YOLO26n | 2.4M | 54.8 | 28.3 | 47.7 | 60.8 |
 
-![Mean RF100-VL AP against parameter count: mayaku-n 58.3 AP at 5.18M, YOLO26s 57.8 at 9.5M, RF-DETR nano 57.4 at 30.5M, YOLO26n 54.8 at 2.4M](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_params.png)
+![Mean RF100-VL AP against parameter count: mayaku-n 58.9 AP at 5.18M, YOLO26s 57.8 at 9.5M, RF-DETR nano 57.4 at 30.5M, YOLO26n 54.8 at 2.4M](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_params.png)
 
 ![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_by_size.png)
 
