@@ -12,10 +12,10 @@ Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on CU
 Silicon or CPU, and every model exports to a graph of just five operations that runs on
 any runtime, including true int8 on NPUs.
 
-![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.3 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
+![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
 
 - **Highest fine-tune AP at nano size.** Across all 100 datasets of
-  [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.3 AP**: ahead of RF-DETR nano
+  [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.9 AP**: ahead of RF-DETR nano
   (57.4, with 6× the parameters), YOLO26s (57.8) and YOLO26n (54.8).
 - **True int8.** The deploy graph uses only convolutions, ReLU, add, max-pool and nearest
   resize, so it quantizes almost end to end: everything except the final output
@@ -75,7 +75,7 @@ checkpoint is scored by the same pycocotools evaluator on each dataset's validat
 
 | Model | Params | Mean AP | AP<sub>S</sub> | AP<sub>M</sub> | AP<sub>L</sub> |
 |---|---:|---:|---:|---:|---:|
-| **mayaku-n** | **5.2M** | **58.3** | **33.5** | **51.4** | 63.9 |
+| **mayaku-n** | **5.2M** | **58.9** | **33.3** | **52.2** | 64.1 |
 | YOLO26s | 9.5M | 57.8 | 32.3 | 50.9 | 63.5 |
 | RF-DETR nano | 30.5M | 57.4 | 29.6 | 49.5 | 65.6 |
 | YOLO26n | 2.4M | 54.8 | 28.3 | 47.7 | 60.8 |
