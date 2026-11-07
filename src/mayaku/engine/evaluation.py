@@ -149,10 +149,10 @@ def has_masks(ann_path):
     return any(a.get("segmentation") for a in ground_truth(ann_path).dataset["annotations"])
 
 
-def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
+def coco_ap(ann_path, results, iou_type="bbox", k=0):
     """COCO metrics for a list of result records; `iou_type` is bbox, segm or
     keypoints (with `k` keypoints per instance). Keypoints report ten
-    numbers, not twelve. `image_ids` scores those images only. Box records
+    numbers, not twelve. Box records
     that carry an "rbox" are oriented boxes, scored by their exact rotated
     IoU against the ground truth's polygons (`rotated_eval`)."""
     from pycocotools.cocoeval import COCOeval
@@ -164,8 +164,6 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
     with contextlib.redirect_stdout(io.StringIO()):
         rotated = iou_type == "bbox" and "rbox" in results[0]
         e = (rotated_eval if rotated else lambda g, d: COCOeval(g, d, iou_type))(gt, gt.loadRes(results))
-        if image_ids is not None:
-            e.params.imgIds = sorted(image_ids)
         if iou_type == "keypoints":
             # pycocotools defaults its OKS sigmas to the 17 COCO person
             # keypoints; a model with a different K needs its own, the same
@@ -181,13 +179,13 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
     return dict(zip(stats, [float(v) for v in e.stats], strict=True))
 
 
-def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, image_ids=None):
+def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
     """COCO metrics for `(image_id, Detections)` pairs: box AP, plus mask AP
     under "segm_" and keypoint AP under "kpt_" when the model has those heads
     (mask AP only when the ground truth has masks).
     Keypoints are scored against `kpt_ann_path` when the file is separate.
-    `image_ids` scores those images only, not the whole file. Oriented boxes
-    (detections with `rboxes`) are scored by their rotated IoU."""
+    Oriented boxes (detections with `rboxes`) are scored by their rotated
+    IoU."""
     seg = seg and has_masks(ann_path)
     results, segm, kpts = [], [], []
     for image_id, det in detections:
@@ -196,12 +194,12 @@ def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, im
             segm += to_coco_segm(det, image_id, cat_ids)
         if kpt:
             kpts += to_coco_kpt(det, image_id, cat_ids)
-    out = coco_ap(ann_path, results, image_ids=image_ids)
+    out = coco_ap(ann_path, results)
     if seg:
-        out.update({"segm_" + k: v for k, v in coco_ap(ann_path, segm, "segm", image_ids=image_ids).items()})
+        out.update({"segm_" + k: v for k, v in coco_ap(ann_path, segm, "segm").items()})
     if kpt:
         out.update({"kpt_" + k: v for k, v in
-                    coco_ap(kpt_ann_path or ann_path, kpts, "keypoints", k=kpt, image_ids=image_ids).items()})
+                    coco_ap(kpt_ann_path or ann_path, kpts, "keypoints", k=kpt).items()})
     return out
 
 

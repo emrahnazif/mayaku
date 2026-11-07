@@ -91,16 +91,6 @@ def test_postprocess_decodes_a_planted_object(multi_label, hw, cell) -> None:
     assert (dets[0][0] - want).abs().max().item() < 0.05
 
 
-def test_subset_scoring_counts_only_the_images_run(ds) -> None:
-    """Perfect detections on the first images, scored as a subset, are AP 1:
-    the images that were not run must not count as misses."""
-    n = len(ds) // 2
-    pairs = [(ds.ids[i], _as_detections(torch.from_numpy(ds.labels[i]))) for i in range(n)]
-    sub = score(ds.ann_path, pairs, ds.cat_ids, image_ids=ds.ids[:n])
-    full = score(ds.ann_path, pairs, ds.cat_ids)
-    assert sub["AP"] > 0.99 and full["AP"] < 0.9
-
-
 def test_evaluate_runs_end_to_end(ds) -> None:
     stats = evaluate(Detector(TINY, ds.nc), ds, batch=4, d=dataclasses.replace(DEPLOY, conf=0.05))
     assert stats["AP"] < 0.05     # untrained: what is under test is the plumbing
