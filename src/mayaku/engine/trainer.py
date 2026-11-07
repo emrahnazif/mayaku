@@ -42,7 +42,7 @@ from mayaku.data.batch import (
 )
 from mayaku.data.canvas import multi_scale_canvases
 from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
-from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, summary
+from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, ranked_metric, summary
 from mayaku.engine.loss import ClassifyLoss, DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
 from mayaku.model.quant import fake_quant_disabled, is_qat, observers, ranges_frozen
@@ -313,7 +313,8 @@ def loss_text(totals, n):
 
 def rank_score(rec, key):
     """What `best.pt` is chosen on: the lower of a record's fp32 and int8
-    `key`; a record without `key` (no best yet) ranks last."""
+    `key`; a record without `key` (none yet, or an older state.pt's `best`
+    ranked on another metric) ranks last."""
     if key not in rec:
         return -1.0
     return min(rec[key], rec.get(key + "_int8", rec[key]))
@@ -368,7 +369,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     `mayaku.model.enable_qat` and training and the saved ranges are the
     int8 ones; every evaluation also scores it in simulated int8
     (`<key>_int8`). `best.pt` is the epoch with the highest `rank_score` of
-    its box AP (a classifier's top-1).
+    the model's `ranked_metric`.
 
     Every `log_every` iterations the running loss is printed with a rate and
     an estimate; that line is the only place the host waits on the device
@@ -483,7 +484,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         with open(os.path.join(out, "tier.json"), "w") as f:
             json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
         open(log_path, "w").close()
-    key, stats = ("top1", CLS_STATS) if model.task == "classify" else ("AP", STATS)
+    stats = CLS_STATS if model.task == "classify" else STATS
     records, best = [], resume["best"] if resume else {}
     final_start = r.epochs - r.final_epochs
     pending = 0     # micro-batches in the step being accumulated, across epochs
@@ -567,6 +568,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             kw = dict(device=device, batch=r.batch, workers=workers, d=r.decode)
             with fake_quant_disabled(ema.model) if qat else contextlib.nullcontext():
                 rec.update(evaluate(ema.model, val_ds, **kw))
+            key = ranked_metric(rec)
             if qat:
                 rec[key + "_int8"] = evaluate(ema.model, val_ds, **kw)[key]
             if rank_score(rec, key) > rank_score(best, key):

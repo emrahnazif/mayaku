@@ -172,7 +172,7 @@ runs/mayaku-n-det/
 
 - `best.pt` and `last.pt` are **self-contained**: each holds the weights, the full config, the class names, the canvas and the prediction thresholds. Pass either to `from_pretrained`, `mayaku predict`, `mayaku eval`, `mayaku export`, or back to `train` as `weights`.
 - Both hold the EMA weights (an exponential moving average of the training weights), which is the model that is evaluated.
-- `best.pt` is the epoch with the highest **box AP** (top-1 accuracy for a classifier). This is also true for segmentation and keypoint models. With QAT (the default) each epoch counts as the lower of its fp32 and int8 scores, so `best.pt` is the epoch that does best in either precision. `best.json` then also holds the int8 score as `AP_int8` (`top1_int8` for a classifier).
+- `best.pt` is the epoch with the highest score on what the model is trained for: **keypoint AP** for a keypoint model, **mask AP** for a segmentation model (box AP if the validation annotations have no masks), **box AP** for a detector, and top-1 accuracy for a classifier. Segmentation and keypoint runs add that metric to each epoch's log line, after the box metrics. With QAT (the default) each epoch counts as the lower of its fp32 and int8 scores, so `best.pt` is the epoch that does best in either precision. `best.json` then also holds the int8 score, for example `AP_int8`, `segm_AP_int8` or `kpt_AP_int8`.
 - `state.pt` is much larger than the others because it also holds the optimizer state. You don't need it once training is done.
 
 ## Validation
@@ -228,7 +228,7 @@ The defaults are the recipe Mayaku is tuned with. The fields you are most likely
 epoch  41  ...  AP 0.6123 ...  int8 vs float -0.3 AP
 ```
 
-The logged metrics are the fp32 ones, and `log.jsonl` also records `AP_int8` (`top1_int8` for a classifier). `best.pt` is chosen on the lower of the two scores (see [The run directory](#the-run-directory)). The line ends with `WARNING` when int8 loses more than 1 AP point. Turn QAT off with `--set model.qat=false` if you will only ever deploy in float.
+The logged metrics are the fp32 ones, and `log.jsonl` also records the int8 score of the ranked metric (`AP_int8`, `segm_AP_int8` or `kpt_AP_int8`). `best.pt` is chosen on the lower of the two scores (see [The run directory](#the-run-directory)). The line ends with `WARNING` when int8 loses more than 1 AP point. Turn QAT off with `--set model.qat=false` if you will only ever deploy in float.
 
 All recipe fields are listed in [Configuration](/mayaku/reference/configuration/#train).
 

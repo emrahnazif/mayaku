@@ -143,6 +143,16 @@ def test_rank_score_is_the_lower_of_fp32_and_int8() -> None:
     assert rank_score({"AP": 0.50, "AP_int8": 0.47}, "AP") == 0.47
     assert rank_score({"AP": 0.48, "AP_int8": 0.51}, "AP") == 0.48
     assert rank_score({"AP": 0.50}, "AP") == 0.50
-    # no best yet: ranks last
+    # no best yet, or an older state.pt's best ranked on box AP: ranks last
     assert rank_score({}, "AP") == -1.0
+    assert rank_score({"AP": 0.50}, "segm_AP") == -1.0
 
+
+def test_ranked_metric_is_what_the_model_is_trained_for() -> None:
+    """Keypoint AP over mask AP over box AP: mask AP exists only when the
+    ground truth has masks, so a seg model on box-only data ranks on box AP."""
+    from mayaku.engine.evaluation import ranked_metric
+    assert ranked_metric({"AP": 0.5, "segm_AP": 0.4}) == "segm_AP"
+    assert ranked_metric({"AP": 0.5, "kpt_AP": 0.6}) == "kpt_AP"
+    assert ranked_metric({"AP": 0.5}) == "AP"
+    assert ranked_metric({"top1": 0.9, "top5": 1.0}) == "top1"

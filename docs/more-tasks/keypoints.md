@@ -66,7 +66,7 @@ The final `metrics` dict holds the box metrics (`AP`, `AP50`, ...) and the keypo
 
 Keypoint AP uses COCO's OKS (object keypoint similarity). The per-keypoint tolerances are built into the model, not taken from your data.
 
-`best.pt` is chosen by **box** AP. Per-epoch keypoint AP is in `train/log.jsonl`.
+`best.pt` is chosen by **keypoint** AP (`kpt_AP`), which each epoch's log line shows after the box metrics. With QAT, an epoch counts as the lower of its fp32 and int8 keypoint AP.
 
 ## Predict
 

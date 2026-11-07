@@ -65,7 +65,7 @@ From scratch, with no weights: `--set model.seg=true`.
 
 Training scores both boxes and masks. The final `metrics` dict and `eval/metrics.json` hold the box metrics (`AP`, `AP50`, ...) and the mask metrics with a `segm_` prefix (`segm_AP`, `segm_AP50`, `segm_AP75`, `segm_AP-S`, `segm_AP-M`, `segm_AP-L`, `segm_AR1`, ...). See [Evaluation](/mayaku/deployment/evaluation/).
 
-`best.pt` is chosen by **box** AP. Per-epoch mask AP is in `train/log.jsonl`.
+`best.pt` is chosen by **mask** AP (`segm_AP`), which each epoch's log line shows after the box metrics. Validation annotations without masks fall back to box AP. With QAT, an epoch counts as the lower of its fp32 and int8 mask AP.
 
 ## Predict
 

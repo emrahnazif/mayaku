@@ -311,11 +311,19 @@ def evaluate_runner_classifier(runner, images, batch=16, log=None) -> dict[str, 
     return accuracy(torch.stack(probs), torch.from_numpy(data.labels))
 
 
+def ranked_metric(stats):
+    """What a model is trained for, the metric training picks `best.pt` on:
+    a classifier's top-1, keypoint AP, mask AP (scored only when the ground
+    truth has masks), else box AP."""
+    return next(k for k in ("top1", "kpt_AP", "segm_AP", "AP") if k in stats)
+
+
 def summary(stats, prefix=""):
-    """One line, AP first, size split always present; a classifier's
-    top-1 / top-5."""
+    """One line, AP first, size split always present, then mask and
+    keypoint AP when scored; a classifier's top-1 / top-5."""
     if "top1" in stats:
         return "%stop1 %.4f  top5 %.4f" % (prefix, stats["top1"], stats["top5"])
     return "%sAP %.4f  AP50 %.4f  AP75 %.4f  S %.4f  M %.4f  L %.4f" % (
         prefix, stats["AP"], stats["AP50"], stats["AP75"],
-        stats["AP-S"], stats["AP-M"], stats["AP-L"])
+        stats["AP-S"], stats["AP-M"], stats["AP-L"]) + "".join(
+        "  %s %.4f" % (k, stats[k]) for k in ("segm_AP", "kpt_AP") if k in stats)
