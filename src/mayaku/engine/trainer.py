@@ -92,10 +92,6 @@ class Recipe:
     # recomputed over before every evaluation and every checkpoint. 0
     # disables it. See `recalibrate`.
     recalibrate_images: int = 640
-    # QAT only: every evaluation also scores the first this many val images
-    # with the int8 simulation on and off and logs float AP minus int8 AP
-    # (`int8_gap`), warning past INT8_GAP_WARN. 0 disables it.
-    int8_check_images: int = 500
     # TaskAligned alignment exponent beta in s^alpha * u^beta (TOOD's 6.0).
     # Lower values let lower-IoU small positives rank.
     tal_beta: float = 6.0
@@ -305,14 +301,8 @@ class _Unaugmented(Dataset):
         return to_tensor(img)
 
 
-# float AP minus int8 AP on the check images above which training warns
+# float AP minus int8 AP on the val split above which training warns
 INT8_GAP_WARN = 0.01
-
-
-def primary(model):
-    """The metric a run ranks its epochs by (box AP, or a classifier's
-    top-1) and the stats it logs."""
-    return ("top1", CLS_STATS) if model.task == "classify" else ("AP", STATS)
 
 
 def loss_text(totals, n):
@@ -321,19 +311,12 @@ def loss_text(totals, n):
                      for k in ("box", "cls", "dfl") if k in totals)
 
 
-def int8_gap(model, val_ds, n, f=None, **kw):
-    """Float AP minus int8 AP of a QAT model on the first `n` val images:
-    the same weights, BatchNorm and ranges, the int8 simulation off and on.
-    Watches what the scored and exported number costs against the float
-    network, so a range that collapses a level shows the epoch it happens.
-    (A classifier's top-1, likewise.) `f` is the float score when the
-    caller already has it for those images (`n` covers the whole split)."""
-    key = primary(model)[0]
-    q = evaluate(model, val_ds, limit=n, **kw)[key]
-    if f is None:
-        with fake_quant_disabled(model):
-            f = evaluate(model, val_ds, limit=n, **kw)[key]
-    return f - q
+def rank_score(rec, key):
+    """What `best.pt` is chosen on: the lower of a record's fp32 and int8
+    `key`; a record without `key` (no best yet) ranks last."""
+    if key not in rec:
+        return -1.0
+    return min(rec[key], rec.get(key + "_int8", rec[key]))
 
 
 @torch.no_grad()
@@ -383,8 +366,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     `last.pt` is the run's result. Quantization-aware
     training is a property of the model: pass one that went through
     `mayaku.model.enable_qat` and training and the saved ranges are the
-    int8 ones; scoring is fp32, as the checkpoint deploys, with the int8
-    cost logged beside it (`int8_gap`).
+    int8 ones; every evaluation also scores it in simulated int8
+    (`<key>_int8`). `best.pt` is the epoch with the highest `rank_score` of
+    its box AP (a classifier's top-1).
 
     Every `log_every` iterations the running loss is printed with a rate and
     an estimate; that line is the only place the host waits on the device
@@ -499,8 +483,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         with open(os.path.join(out, "tier.json"), "w") as f:
             json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
         open(log_path, "w").close()
-    key, stats = primary(model)
-    records, best = [], resume["best"] if resume else {key: -1.0}
+    key, stats = ("top1", CLS_STATS) if model.task == "classify" else ("AP", STATS)
+    records, best = [], resume["best"] if resume else {}
     final_start = r.epochs - r.final_epochs
     pending = 0     # micro-batches in the step being accumulated, across epochs
 
@@ -578,25 +562,21 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         recalibrate(ema.model, train_ds, r.recalibrate_images,
                     device=device, workers=min(workers, 4))
         if val_ds is not None and ((epoch + 1) % eval_every == 0 or epoch == r.epochs - 1):
-            # scored as it deploys and is reported: the fp32 graph. Picking
-            # best.pt on the int8 simulation instead favoured epochs where int8
-            # beat float by chance (on a small split they swing +-2 AP apart),
-            # and their fp32 score came out up to 2 AP below the logged one.
+            # the logged metrics are the fp32 graph's; a QAT model is also
+            # scored through the int8 simulation (ranges frozen in eval)
+            kw = dict(device=device, batch=r.batch, workers=workers, d=r.decode)
             with fake_quant_disabled(ema.model) if qat else contextlib.nullcontext():
-                rec.update(evaluate(ema.model, val_ds, device=device,
-                                    batch=r.batch, workers=workers, d=r.decode))
-            if qat and r.int8_check_images > 0:
-                whole = r.int8_check_images >= len(val_ds)     # the float score is in hand
-                rec["int8_gap"] = int8_gap(ema.model, val_ds, r.int8_check_images,
-                                           f=rec[key] if whole else None, device=device,
-                                           batch=r.batch, workers=workers, d=r.decode)
-            if rec[key] > best[key]:
-                best = {"epoch": epoch, **{k: rec[k] for k in stats}}
+                rec.update(evaluate(ema.model, val_ds, **kw))
+            if qat:
+                rec[key + "_int8"] = evaluate(ema.model, val_ds, **kw)[key]
+            if rank_score(rec, key) > rank_score(best, key):
+                best = {"epoch": epoch, **{k: rec[k] for k in (*stats, key, key + "_int8")
+                                           if k in rec}}
                 if out:
                     save_checkpoint(ema.model, os.path.join(out, "best.pt"), sidecar)
                     with open(os.path.join(out, "best.json"), "w") as f:
                         json.dump(best, f, indent=2)
-            gap = rec.get("int8_gap")
+            gap = rec[key] - rec[key + "_int8"] if qat else None
             log("epoch %3d  %s  %s" % (epoch, loss_text(rec, 1), summary(rec))
                 + ("" if gap is None else "  int8 vs float %+.1f %s%s"
                    % (-100 * gap, key, "  WARNING" if gap > INT8_GAP_WARN else "")))

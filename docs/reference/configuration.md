@@ -142,7 +142,6 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | `train.ema_decay` | `0.9999` | Decay of the exponential moving average of the weights. The EMA weights are what is evaluated and saved. |
 | `train.ema_tau` | `2000.0` | Ramp of the EMA decay in steps, so the average is useful from the first steps. |
 | `train.recalibrate_images` | `640` | Before each evaluation and checkpoint, BatchNorm statistics of the EMA model are recomputed over this many unaugmented training images. `0` turns it off. |
-| `train.int8_check_images` | `500` | QAT only: each evaluation also scores this many validation images in simulated int8 and logs the gap to float. `0` turns it off. |
 | `train.multiscale` | `0` | Multi-scale training: the smallest size budget to train at, `0` for off. Each batch is downscaled to a random size between this budget and the canvas. Evaluation always uses the canvas. It usually costs accuracy at the canvas size. Use it only if you will deploy smaller than you train. |
 
 ### Loss and label assignment

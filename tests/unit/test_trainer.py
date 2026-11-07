@@ -89,8 +89,9 @@ def test_tiny_run_learns(tmp_path, qat) -> None:
     assert records[-1]["cls"] < records[0]["cls"] / 1.5
     assert records[-1]["box"] < records[0]["box"] / 1.5
     assert (tmp_path / "run" / "best.pt").exists()
-    # the int8 check is logged with QAT and only then
-    assert ("int8_gap" in records[-1]) == qat
+    # the int8 score is logged and ranked on with QAT and only then
+    assert ("AP_int8" in records[-1]) == qat
+    assert ("AP_int8" in best) == qat
 
 
 def test_ema_int8_ranges_count_as_observed_with_the_live_ones() -> None:
@@ -132,3 +133,16 @@ def test_a_step_is_the_same_size_at_any_micro_batch(tmp_path, monkeypatch) -> No
         monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", first_norm(batch))
         train(model, ds, None, r, log_every=0, log=lambda *_: None)
     assert 0.5 < norms[2] / norms[8] < 2.0
+
+
+def test_rank_score_is_the_lower_of_fp32_and_int8() -> None:
+    """A QAT epoch ranks on its weaker precision, so int8 beating float by
+    chance cannot pick it; a record without an int8 score (a float model,
+    or a `best` resumed from an older state.pt) ranks on fp32."""
+    from mayaku.engine.trainer import rank_score
+    assert rank_score({"AP": 0.50, "AP_int8": 0.47}, "AP") == 0.47
+    assert rank_score({"AP": 0.48, "AP_int8": 0.51}, "AP") == 0.48
+    assert rank_score({"AP": 0.50}, "AP") == 0.50
+    # no best yet: ranks last
+    assert rank_score({}, "AP") == -1.0
+

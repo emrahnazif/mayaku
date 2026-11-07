@@ -172,7 +172,7 @@ runs/mayaku-n-det/
 
 - `best.pt` and `last.pt` are **self-contained**: each holds the weights, the full config, the class names, the canvas and the prediction thresholds. Pass either to `from_pretrained`, `mayaku predict`, `mayaku eval`, `mayaku export`, or back to `train` as `weights`.
 - Both hold the EMA weights (an exponential moving average of the training weights), which is the model that is evaluated.
-- `best.pt` is the epoch with the highest **box AP** (top-1 accuracy for a classifier). This is also true for segmentation and keypoint models.
+- `best.pt` is the epoch with the highest **box AP** (top-1 accuracy for a classifier). This is also true for segmentation and keypoint models. With QAT (the default) each epoch counts as the lower of its fp32 and int8 scores, so `best.pt` is the epoch that does best in either precision. `best.json` then also holds the int8 score as `AP_int8` (`top1_int8` for a classifier).
 - `state.pt` is much larger than the others because it also holds the optimizer state. You don't need it once training is done.
 
 ## Validation
@@ -222,13 +222,13 @@ The defaults are the recipe Mayaku is tuned with. The fields you are most likely
 
 **The final stage.** The last `train.final_frac` of the epochs (16% from scratch, 20% when fine-tuning) train without mosaic or scale and translate jitter, on images that look like the ones the model will see in use. The log announces it: `epoch 80: mosaic off, final stage ...`.
 
-**Quantization-aware training (QAT)** is on by default (`model.qat: true`). The model learns weights that keep their accuracy in int8, so the same checkpoint exports to float or int8 (see [Export](/mayaku/deployment/export/#int8)). After each evaluation, training also scores the first 500 validation images in simulated int8 and logs the difference:
+**Quantization-aware training (QAT)** is on by default (`model.qat: true`). The model learns weights that keep their accuracy in int8, so the same checkpoint exports to float or int8 (see [Export](/mayaku/deployment/export/#int8)). Each evaluation scores the whole validation split twice, in fp32 and in simulated int8, and logs the difference:
 
 ```text
 epoch  41  ...  AP 0.6123 ...  int8 vs float -0.3 AP
 ```
 
-It appends `WARNING` when int8 loses more than 1 AP point. Turn QAT off with `--set model.qat=false` if you will only ever deploy in float.
+The logged metrics are the fp32 ones, and `log.jsonl` also records `AP_int8` (`top1_int8` for a classifier). `best.pt` is chosen on the lower of the two scores (see [The run directory](#the-run-directory)). The line ends with `WARNING` when int8 loses more than 1 AP point. Turn QAT off with `--set model.qat=false` if you will only ever deploy in float.
 
 All recipe fields are listed in [Configuration](/mayaku/reference/configuration/#train).
 

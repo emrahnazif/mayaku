@@ -36,7 +36,7 @@ __all__ = [
 # they existed -- a run's config.yaml, a checkpoint's sidecar -- still carry
 # them; they are dropped on read so those files keep loading, while any other
 # unknown key still fails validation.
-RETIRED = (("train", "warmup_iters_min"),)
+RETIRED = (("train", "warmup_iters_min"), ("train", "int8_check_images"))
 
 
 def drop_retired(raw: Mapping[str, Any]) -> dict[str, Any]:

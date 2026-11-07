@@ -110,7 +110,7 @@ mayaku export coreml   best.pt --precision int8 --output model_int8.mlpackage
 ```
 
 - A model trained with `model.qat: false` can't export int8. It fails with `int8 needs a quantization-aware model (train it with model.qat)`.
-- During training, the log line `int8 vs float -0.3 AP` reports the expected accuracy cost. To measure it exactly, run `mayaku eval` on the int8 file.
+- During training, the log line `int8 vs float -0.3 AP` reports the expected accuracy cost on the whole validation split, and `best.pt` is chosen on the lower of the fp32 and int8 scores. To measure it exactly, run `mayaku eval` on the int8 file.
 - **TensorRT int8** needs symmetric activation ranges, the default (`model.qat_activations: symmetric`). Models trained with `affine`, and QAT checkpoints from before this setting existed, fail with `TensorRT runs int8 with symmetric activation ranges only`.
 - **Core ML int8** needs iOS 17 / macOS 14 or newer. On Apple chips before the A17 Pro and M4 it runs, but is not faster than fp16.
 

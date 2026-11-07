@@ -116,6 +116,8 @@ def test_load_yaml_drops_retired_fields_only(tmp_path: Path) -> None:
     p = tmp_path / "old.yaml"
     p.write_text("train:\n  epochs: 7\n  warmup_iters_min: 100\n")
     assert load_yaml(p).train.epochs == 7
+    p.write_text("train:\n  epochs: 7\n  int8_check_images: 500\n")
+    assert load_yaml(p).train.epochs == 7
     p.write_text("train:\n  warmup_iters_minimum: 100\n")
     with pytest.raises(ValidationError):
         load_yaml(p)

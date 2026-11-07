@@ -213,17 +213,15 @@ def accuracy(probs, labels):
 
 
 @torch.no_grad()
-def evaluate_classifier(model, dataset, device="cpu", batch=16, workers=0, limit=None):
+def evaluate_classifier(model, dataset, device="cpu", batch=16, workers=0):
     """Top-1 / top-5 accuracy of a classifier on a class-folder split
-    (`mayaku.data.folder.FolderDataset`); `limit` scores the first `limit`
-    images."""
-    from torch.utils.data import DataLoader, Subset
+    (`mayaku.data.folder.FolderDataset`)."""
+    from torch.utils.data import DataLoader
 
     from mayaku.model.classify import logits
 
     assert model.nc == dataset.nc, (model.nc, dataset.nc)
-    images = Subset(dataset, range(limit)) if limit is not None and limit < len(dataset) else dataset
-    loader = DataLoader(images, batch_size=batch, shuffle=False, num_workers=workers,
+    loader = DataLoader(dataset, batch_size=batch, shuffle=False, num_workers=workers,
                         collate_fn=collate, pin_memory=device.startswith("cuda"))
     was_training = model.training
     model.eval()
@@ -238,24 +236,20 @@ def evaluate_classifier(model, dataset, device="cpu", batch=16, workers=0, limit
 
 
 @torch.no_grad()
-def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY, limit=None):
+def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
     """Run a model over a dataset and return the COCO metrics.
 
     The class count and `reg_max` come from the model, because the model is
     what fixed the head's channel split. The dataset is asserted against it,
     so a head and an annotation file that disagree fail here instead of
-    decoding plausible nonsense. `limit` runs and scores the first `limit`
-    images only.
+    decoding plausible nonsense.
     """
-    from torch.utils.data import DataLoader, Subset
+    from torch.utils.data import DataLoader
 
     if model.task == "classify":
-        return evaluate_classifier(model, dataset, device, batch, workers, limit)
+        return evaluate_classifier(model, dataset, device, batch, workers)
     assert model.nc == dataset.nc, (model.nc, dataset.nc)
-    subset = limit is not None and limit < len(dataset)
-    images = Subset(dataset, range(limit)) if subset else dataset
-    image_ids = dataset.ids[:limit] if subset else None
-    loader = DataLoader(images, batch_size=batch, shuffle=False,
+    loader = DataLoader(dataset, batch_size=batch, shuffle=False,
                         num_workers=workers, collate_fn=collate,
                         pin_memory=device.startswith("cuda"))
     was_training = model.training
@@ -272,7 +266,7 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY, limit=
 
     try:
         return score(dataset.ann_path, detections(), dataset.cat_ids, seg, kpt,
-                     dataset.kpt_ann_path, image_ids=image_ids)
+                     dataset.kpt_ann_path)
     finally:
         model.train(was_training)
 

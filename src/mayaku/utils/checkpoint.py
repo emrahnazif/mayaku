@@ -163,7 +163,7 @@ def sidecar_config(sidecar: Mapping[str, Any]) -> MayakuConfig:
 
 def select_final_weights(train_dir: Path) -> Path:
     """The run's deliverable weights: ``best.pt`` (the EMA model at its best
-    validation AP) when the run evaluated, else ``last.pt``. Raises
+    validation score, the lower of fp32 and int8 for a QAT model) when the run evaluated, else ``last.pt``. Raises
     ``RuntimeError`` when the run produced neither."""
     for name in ("best.pt", "last.pt"):
         if (train_dir / name).exists():
