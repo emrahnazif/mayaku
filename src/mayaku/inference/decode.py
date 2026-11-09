@@ -228,10 +228,11 @@ def _decode_masks(grp, dets, idxs, points, stride, kflat, ms, metas, encode_mask
     return [flat[base[b]:base[b + 1]] for b in range(len(dets))] if encode_mask else out
 
 
-def decode_sidecar(preds, metas, sidecar, conf=None) -> list[Detections] | list[Classification]:
+def decode_sidecar(preds, metas, sidecar, conf=None,
+                   encode_mask=None) -> list[Detections] | list[Classification]:
     """`decode` with every parameter read from a model's sidecar (see
     `mayaku.utils.checkpoint.build_sidecar`); `conf` overrides the recorded
-    score threshold. A classifier's sidecar (`task: classify`) gives one
+    score threshold, `encode_mask` is `decode`'s. A classifier's sidecar (`task: classify`) gives one
     `Classification` per image instead: the softmax of the class map's
     spatial mean."""
     if sidecar.get("task") == "classify":
@@ -243,4 +244,4 @@ def decode_sidecar(preds, metas, sidecar, conf=None) -> list[Detections] | list[
     kp = sidecar["keypoints"]
     return decode(preds, metas, len(sidecar["class_names"]), dec["reg_max"],
                   seg=sidecar["mask"] is not None, kpt=kp["num"] if kp else 0, d=d,
-                  obb=bool(sidecar.get("obb")))
+                  encode_mask=encode_mask, obb=bool(sidecar.get("obb")))

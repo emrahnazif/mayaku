@@ -44,9 +44,10 @@ class Runner:
         return self.batch([image], conf)[0]
 
     @torch.no_grad()
-    def batch(self, images: Sequence[ImageInput],
-              conf: float | None = None) -> list[Detections] | list[Classification]:
+    def batch(self, images: Sequence[ImageInput], conf: float | None = None,
+              encode_mask=None) -> list[Detections] | list[Classification]:
         """Several images in one pass. `conf` overrides the recorded score
-        threshold."""
+        threshold; `encode_mask` hands masks over encoded (see
+        `mayaku.inference.decode.decode`), as the evaluator's RLE."""
         x, metas = letterbox_batch(images, self.canvas, self._canvases(len(images)))
-        return decode_sidecar(self._forward(x), metas, self.sidecar, conf)
+        return decode_sidecar(self._forward(x), metas, self.sidecar, conf, encode_mask)
