@@ -10,6 +10,7 @@ disagreement is never ambiguous between the model and the ruler. AP-S / AP-M
 import contextlib
 import functools
 import io
+import types
 
 import numpy as np
 import torch
@@ -107,21 +108,40 @@ def _gt_rbox(ann):
     return ann["rbox"]
 
 
-def rotated_eval(gt, dt):
-    """pycocotools' COCOeval with the exact IoU of oriented boxes
-    (`obb.rotated_iou`) in place of the axis-aligned one; matching, area
-    ranges and the AP / AR summaries are COCO's own. Crowd regions are
-    matched as ordinary objects."""
-    from pycocotools.cocoeval import COCOeval
+@functools.cache
+def coco_api():
+    """The COCO API, resolved once: ``.COCO`` and ``.COCOeval`` from
+    faster-coco-eval when installed -- the same numbers as pycocotools to the
+    last digit, its per-image matching and accumulation in C++, several
+    times faster on large splits -- else from pycocotools."""
+    try:
+        from faster_coco_eval import COCO
+        from faster_coco_eval import COCOeval_faster as COCOeval
+    except ImportError:
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
+    return types.SimpleNamespace(COCO=COCO, COCOeval=COCOeval)
 
-    class RotatedEval(COCOeval):
+
+def rotated_eval(gt, dt):
+    """COCOeval with the exact IoU of oriented boxes (`obb.rotated_iou`) in
+    place of the axis-aligned one; matching, area ranges and the AP / AR
+    summaries are COCO's own. Crowd regions are matched as ordinary
+    objects."""
+
+    class RotatedEval(coco_api().COCOeval):
+        def instances(self, imgId, catId):
+            p = self.params
+            cats = [catId] if p.useCats else p.catIds
+            if hasattr(self, "gt_dataset"):     # faster-coco-eval's C++ index
+                return (self.gt_dataset.get_instances([imgId], cats, bool(p.useCats))[0][0],
+                        self.dt_dataset.get_instances([imgId], cats, bool(p.useCats))[0][0])
+            return ([a for c in cats for a in self._gts[imgId, c]],
+                    [a for c in cats for a in self._dts[imgId, c]])
+
         def computeIoU(self, imgId, catId):
             p = self.params
-            if p.useCats:
-                g, d = self._gts[imgId, catId], self._dts[imgId, catId]
-            else:
-                g = [a for c in p.catIds for a in self._gts[imgId, c]]
-                d = [a for c in p.catIds for a in self._dts[imgId, c]]
+            g, d = self.instances(imgId, catId)
             if not g or not d:
                 return []
             order = np.argsort([-a["score"] for a in d], kind="mergesort")
@@ -137,9 +157,8 @@ def ground_truth(ann_path):
     """The parsed annotations, once per path. Large annotation files cost
     seconds to parse and index and the trainer evaluates every epoch; they
     are read-only, so one parse serves the whole run."""
-    from pycocotools.coco import COCO
     with contextlib.redirect_stdout(io.StringIO()):
-        return COCO(ann_path)
+        return coco_api().COCO(ann_path)
 
 
 @functools.cache
@@ -155,17 +174,15 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
     numbers, not twelve. Box records
     that carry an "rbox" are oriented boxes, scored by their exact rotated
     IoU against the ground truth's polygons (`rotated_eval`)."""
-    from pycocotools.cocoeval import COCOeval
-
     stats = KPT_STATS if iou_type == "keypoints" else STATS
     if not results:
         return dict.fromkeys(stats, 0.0)
     gt = ground_truth(ann_path)
+    rotated = iou_type == "bbox" and "rbox" in results[0]
     with contextlib.redirect_stdout(io.StringIO()):
-        rotated = iou_type == "bbox" and "rbox" in results[0]
-        e = (rotated_eval if rotated else lambda g, d: COCOeval(g, d, iou_type))(gt, gt.loadRes(results))
+        e = (rotated_eval if rotated else lambda g, d: coco_api().COCOeval(g, d, iou_type))(gt, gt.loadRes(results))
         if iou_type == "keypoints":
-            # pycocotools defaults its OKS sigmas to the 17 COCO person
+            # COCOeval defaults its OKS sigmas to the 17 COCO person
             # keypoints; a model with a different K needs its own, the same
             # table the loss uses
             e.params.kpt_oks_sigmas = kptlib.sigmas(k).numpy()
@@ -176,7 +193,8 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
         e.evaluate()
         e.accumulate()
         e.summarize()
-    return dict(zip(stats, [float(v) for v in e.stats], strict=True))
+    # faster-coco-eval keeps extra numbers after COCO's own
+    return dict(zip(stats, [float(v) for v in e.stats[:len(stats)]], strict=True))
 
 
 def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
