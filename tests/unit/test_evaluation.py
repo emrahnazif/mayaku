@@ -152,6 +152,39 @@ def test_mask_decode_is_chunk_invariant(monkeypatch, mask_stride) -> None:
         assert [rle(m) for m in w.masks] == e.masks
 
 
+@pytest.mark.parametrize("mask_stride", [8, 4])
+def test_box_masks_equal_the_full_frame_path(mask_stride) -> None:
+    """Masks computed inside each box's rectangle match thresholding the
+    full-frame maps (`assemble` -> `to_canvas` -> `unletterbox_maps`),
+    letterboxed and not, with boxes touching the frame's edges."""
+    from mayaku.data.geometry import unletterbox_maps
+    from mayaku.model import mask as masklib
+
+    g = torch.Generator().manual_seed(0)
+    s, (hs, ws) = mask_stride, (64 // mask_stride, 96 // mask_stride)
+    feat = torch.randn(8, hs, ws, generator=g)
+    n = 40
+    kernels = torch.randn(n, 169, generator=g) * 0.5
+    xy = torch.rand(n, 2, generator=g) * torch.tensor([96.0, 64.0])
+    wh = torch.rand(n, 2, generator=g) * torch.tensor([60.0, 40.0]) + 1
+    boxes = torch.cat((xy - wh / 2, xy + wh / 2), 1)
+    boxes[:4] = torch.tensor([[0.0, 0, 96, 64], [-5, -5, 20, 20], [80, 50, 100, 70], [3, 0, 9, 64]])
+    points, stride = xy, torch.full((n, 1), 8.0)
+    for meta in ({"ratio": 1.0, "pad": (0, 0), "shape": (64, 96)},
+                 {"ratio": 0.5, "pad": (0, 8), "shape": (96, 192)},
+                 {"ratio": 0.37, "pad": (2, 5), "shape": (147, 254)}):
+        lg = masklib.assemble(feat, kernels, points, stride, boxes, s)
+        full = unletterbox_maps(masklib.to_canvas(lg, s), meta)[:, 0] > 0
+        got = torch.zeros_like(full)
+        img = torch.zeros(n, dtype=torch.long)
+        for k, m, rects in masklib.box_masks(feat[None], img, kernels, points, stride, boxes, s,
+                                             [meta], 1 << 12):
+            for i, mi, (y0, y1, x0, x1) in zip(k, m, rects.tolist(), strict=True):
+                assert not mi[y1 - y0:].any() and not mi[:, x1 - x0:].any()
+                got[i, y0:y1, x0:x1] = mi[:y1 - y0, :x1 - x0]
+        assert (got != full).sum() == 0, (meta, (got != full).sum())
+
+
 def test_rle_batch_equals_pycocotools() -> None:
     """Edge cases for the device-side run lengths: empty, full, masks that
     start or end on a set pixel, single pixels, random blobs."""
