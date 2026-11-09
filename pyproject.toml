@@ -134,6 +134,7 @@ files = ["src/mayaku"]
 module = [
   "torchvision.*",
   "pycocotools.*",
+  "faster_coco_eval.*",
   "coremltools.*",
   "openvino.*",
   "onnxruntime.*",

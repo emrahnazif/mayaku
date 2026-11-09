@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -45,7 +45,8 @@ class Runner:
 
     @torch.no_grad()
     def batch(self, images: Sequence[ImageInput], conf: float | None = None,
-              encode_mask=None) -> list[Detections] | list[Classification]:
+              encode_mask: Callable[..., list[Any]] | None = None
+              ) -> list[Detections] | list[Classification]:
         """Several images in one pass. `conf` overrides the recorded score
         threshold; `encode_mask` hands masks over encoded (see
         `mayaku.inference.decode.decode`), as the evaluator's RLE."""
