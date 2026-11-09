@@ -14,6 +14,7 @@ import types
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from mayaku.data.batch import batch_to, collate
 from mayaku.inference.decode import DEPLOY, decode
@@ -54,29 +55,56 @@ def rle(mask):
     return r
 
 
-def rle_batch(masks):
-    """(n, h, w) bool masks on any device -> their COCO RLEs, equal to `rle`
-    of each. The run boundaries are found where the masks live, in COCO's
-    column-major order, so only the change points cross to the host; the
-    full-resolution transpose and copy were most of a segmenting model's
-    evaluation time."""
+def rle_crops(masks, rects, shapes):
+    """Masks that are False outside a rectangle each -> COCO RLEs of their
+    whole frames: masks (n, H, W) bool, mask k at the top-left of its rect
+    k = [y0, y1, x0, x1] in a frame of shapes[k] = (h, w) pixels (a host
+    sequence; `mayaku.model.mask.box_masks`'s chunks).
+
+    COCO's runs are column-major. A run boundary falls at pixel p where p
+    differs from p - 1 (and at pixel 0 when it is set); outside the
+    rectangle every pixel is False, so the boundaries are the crop's own
+    column transitions with a False row above and below it, shifted to the
+    frame. They are found where the masks live and only the change points
+    cross to the host. Where a column ends set at the frame's bottom row and
+    the next starts set at the top, that pixel pair is one run: the end of
+    one and the start of the other land on the same pixel and cancel."""
     from pycocotools import mask as maskutil
-    n, h, w = masks.shape
-    flat = masks.transpose(1, 2).reshape(n, h * w)
-    # a run starts at pixel p when it differs from pixel p - 1, and at pixel
-    # 0 when that is set (runs alternate from 0s); sorted by mask, then pixel
-    row, pos = (flat[:, 1:] != flat[:, :-1]).nonzero(as_tuple=True)
-    first = flat[:, 0].nonzero()[:, 0]
-    key = torch.cat((row * (h * w) + pos + 1, first * (h * w))).sort().values
-    row, pos = (key // (h * w)).cpu().numpy(), (key % (h * w)).cpu().numpy()
-    ends = np.searchsorted(row, np.arange(n + 1))
-    out = []
-    for k in range(n):
-        p = pos[ends[k]:ends[k + 1]]
-        counts = np.diff(np.concatenate(([0], p, [h * w]))).tolist()
-        r = maskutil.frPyObjects({"size": [h, w], "counts": counts}, h, w)
-        r["counts"] = r["counts"].decode("ascii")
-        out.append(r)
+
+    n = len(masks)
+    hw = np.array([h * w for h, w in shapes], np.int64).reshape(n)
+    span = int(hw.max()) + 1 if n else 1
+    dev = masks.device
+    pad = F.pad(masks.to(torch.uint8), (0, 0, 1, 1))
+    k, r, c = (pad[:, 1:] != pad[:, :-1]).nonzero(as_tuple=True)
+    frame_h = torch.tensor([h for h, _ in shapes], device=dev, dtype=torch.long)
+    pos = (rects[k, 2] + c) * frame_h[k] + rects[k, 0] + r
+    key = (k * span + pos).sort().values
+    twin = key[1:] == key[:-1]
+    drop = torch.zeros_like(key, dtype=torch.bool)    # F.pad would fail on an empty `twin`
+    drop[1:] |= twin
+    drop[:-1] |= twin
+    row, pos = np.divmod(key[~drop].cpu().numpy(), span)
+    keep = pos < hw[row]                              # a boundary at the frame's end is no boundary
+    row, pos = row[keep], pos[keep]
+    # every mask's counts in one pass: its boundaries between a 0 and its
+    # frame's size, differenced, then sliced out per mask
+    cnt = np.bincount(row, minlength=n)
+    seq = np.empty(len(pos) + 2 * n, np.int64)
+    seq[np.arange(len(pos)) + 2 * row + 1] = pos
+    head = np.concatenate(([0], np.cumsum(cnt + 2)[:-1]))
+    seq[head], seq[head + cnt + 1] = 0, hw
+    diffs = np.diff(seq).tolist()
+    out = [None] * n
+    by_shape = {}
+    for i, hw_ in enumerate(map(tuple, shapes)):
+        by_shape.setdefault(hw_, []).append(i)
+    for (h, w), ids in by_shape.items():      # one compression call per frame size
+        rles = maskutil.frPyObjects([{"size": [h, w], "counts": diffs[head[i]:head[i] + cnt[i] + 1]}
+                                     for i in ids], h, w)
+        for i, r in zip(ids, rles, strict=True):
+            r["counts"] = r["counts"].decode("ascii")
+            out[i] = r
     return out
 
 
@@ -277,7 +305,7 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
             preds = model(batch_to(imgs, device))
             # masks RLE-encoded chunk by chunk: never a whole image's at once
             dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d,
-                          encode_mask=rle_batch if seg else None, obb=obb)
+                          encode_mask=rle_crops if seg else None, obb=obb)
             yield from ((meta["id"], det) for meta, det in zip(metas, dets, strict=True))
 
     try:

@@ -134,7 +134,7 @@ def test_mask_decode_is_chunk_invariant(monkeypatch, mask_stride) -> None:
     """Masks upsampled a few detections at a time, and RLE-encoded per chunk,
     match the masks decoded all at once."""
     import mayaku.inference.decode as dec
-    from mayaku.engine.evaluation import rle, rle_batch
+    from mayaku.engine.evaluation import rle, rle_crops
 
     torch.manual_seed(0)
     model = Detector(dataclasses.replace(TINY, seg=True, mask_stride=mask_stride), 3, (64, 96)).eval()
@@ -146,7 +146,7 @@ def test_mask_decode_is_chunk_invariant(monkeypatch, mask_stride) -> None:
     assert all(len(d) > 3 for d in whole)
     monkeypatch.setattr(dec, "MASK_BUDGET", 1)          # one detection per chunk
     chunked = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True)
-    encoded = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True, encode_mask=rle_batch)
+    encoded = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True, encode_mask=rle_crops)
     for w, c, e in zip(whole, chunked, encoded, strict=True):
         assert torch.equal(w.masks, c.masks)
         assert [rle(m) for m in w.masks] == e.masks
@@ -185,10 +185,32 @@ def test_box_masks_equal_the_full_frame_path(mask_stride) -> None:
         assert (got != full).sum() == 0, (meta, (got != full).sum())
 
 
-def test_rle_batch_equals_pycocotools() -> None:
+def test_rle_crops_equal_pycocotools() -> None:
+    """Crops placed anywhere in the frame, touching its edges and corners,
+    encode as the whole frame would."""
+    from mayaku.engine.evaluation import rle, rle_crops
+
+    g = torch.Generator().manual_seed(1)
+    h, w = 9, 7
+    rects = torch.tensor([[0, 9, 0, 7], [0, 4, 0, 3], [5, 9, 4, 7], [0, 9, 2, 3], [3, 4, 0, 7],
+                          [2, 6, 1, 5], [0, 9, 5, 7], [4, 4, 2, 2]])
+    m = torch.rand(len(rects), h, w, generator=g) > 0.4
+    m[0] = True
+    full = torch.zeros(len(rects), h, w, dtype=torch.bool)
+    for i, (y0, y1, x0, x1) in enumerate(rects.tolist()):
+        m[i, y1 - y0:], m[i, :, x1 - x0:] = False, False
+        full[i, y0:y1, x0:x1] = m[i, :y1 - y0, :x1 - x0]
+    assert rle_crops(m, rects, [(h, w)] * len(rects)) == [rle(x) for x in full]
+
+
+def test_rle_crops_of_whole_frames_equal_pycocotools() -> None:
     """Edge cases for the device-side run lengths: empty, full, masks that
     start or end on a set pixel, single pixels, random blobs."""
-    from mayaku.engine.evaluation import rle, rle_batch
+    from mayaku.engine.evaluation import rle, rle_crops
+
+    def whole(masks):
+        n, h, w = masks.shape
+        return rle_crops(masks, torch.tensor([[0, h, 0, w]] * n), [(h, w)] * n)
 
     g = torch.Generator().manual_seed(0)
     h, w = 7, 5
@@ -199,9 +221,9 @@ def test_rle_batch_equals_pycocotools() -> None:
     m[4, :, 0] = True
     m[5, 2:5, 1:3] = True
     m[6:] = torch.rand(2, h, w, generator=g) > 0.5
-    assert rle_batch(m) == [rle(x) for x in m]
+    assert whole(m) == [rle(x) for x in m]
     big = torch.rand(3, 61, 47, generator=g) > 0.7
-    assert rle_batch(big) == [rle(x) for x in big]
+    assert whole(big) == [rle(x) for x in big]
 
 
 def test_a_mask_model_on_box_only_ground_truth_scores_boxes_only(tmp_path) -> None:
