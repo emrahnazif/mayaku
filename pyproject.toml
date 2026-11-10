@@ -50,9 +50,9 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
-  "ruff==0.16.5",
-  "mypy==2.3.1",
-  "types-PyYAML==6.0.12.20260815",
+  "ruff==0.17.4",
+  "mypy==2.4.1",
+  "types-PyYAML==6.0.12.20261103",
 ]
 
 # Same pin-don't-floor reason as `dev` above, extended to what mypy actually
