@@ -97,7 +97,7 @@ def test_cli(run, data, tmp_path) -> None:
     image = str(data["val_images"] / "000.jpg")
     res = cli.invoke(app, ["predict", weights, image, "--conf", "0.01", "--device", "cpu"])
     assert res.exit_code == 0, res.output
-    dets = json.loads(res.output)["detections"]
+    dets = json.loads(res.stdout)["detections"]
     assert dets and set(dets[0]) == {"class_id", "class", "score", "box_xyxy"}
 
     res = cli.invoke(app, ["eval", weights, "--annotations", data["val_annotations"],

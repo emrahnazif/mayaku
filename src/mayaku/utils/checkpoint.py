@@ -16,6 +16,7 @@ the two cannot disagree.
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -75,13 +76,16 @@ def build_sidecar(
     return {
         "schema_version": SIDECAR_SCHEMA_VERSION,
         "task": spec.get("task", "detect"),
-        "config": cfg.model_dump(mode="json"),
+        # train.predict lives in "predict" alone, so mayaku versions that
+        # predate it still read the config (`sidecar_config` puts it back)
+        "config": cfg.model_dump(mode="json", exclude={"train": {"predict"}}),
         "class_names": list(class_names),
         "canvas_hw": list(canvas),
         "outputs": spec["outputs"],
         "decode": {"strides": spec["strides"], "reg_max": spec["reg_max"], "conf": d.conf,
                    "iou": d.iou, "max_det": d.max_det, "topk": d.topk,
                    "multi_label": d.multi_label},
+        "predict": dataclasses.asdict(cfg.train.predict),
         "preprocess": dict(PREPROCESS),
         "mask": spec["mask"],
         "keypoints": keypoints,
@@ -150,7 +154,8 @@ def sidecar_config(sidecar: Mapping[str, Any]) -> MayakuConfig:
     """The `MayakuConfig` a sidecar records. One written before
     `model.qat_activations` existed trained affine activation ranges, so it
     reads back as affine, not as today's symmetric default. Retired fields
-    are dropped (`mayaku.config.io.drop_retired`)."""
+    are dropped (`mayaku.config.io.drop_retired`). `train.predict` comes
+    from the sidecar's "predict" block."""
     from mayaku.config import MayakuConfig
     from mayaku.config.io import drop_retired
 
@@ -158,7 +163,8 @@ def sidecar_config(sidecar: Mapping[str, Any]) -> MayakuConfig:
     model = dict(cfg.get("model") or {})
     if model.get("qat") and "qat_activations" not in model:
         model["qat_activations"] = "affine"
-    return MayakuConfig.model_validate({**cfg, "model": model})
+    train = {**(cfg.get("train") or {}), **({"predict": sidecar["predict"]} if sidecar.get("predict") else {})}
+    return MayakuConfig.model_validate({**cfg, "model": model, "train": train})
 
 
 def select_final_weights(train_dir: Path) -> Path:

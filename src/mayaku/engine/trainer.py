@@ -44,7 +44,7 @@ from mayaku.data.canvas import multi_scale_canvases
 from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
 from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, ranked_metric, summary
 from mayaku.engine.loss import ClassifyLoss, DetectionLoss
-from mayaku.inference.decode import DEPLOY, Decode
+from mayaku.inference.decode import DEPLOY, PREDICT, Decode, PredictDecode
 from mayaku.model.quant import fake_quant_disabled, is_qat, observers, ranges_frozen
 from mayaku.utils.checkpoint import SIDECAR_KEY, check_sidecar, save_checkpoint
 
@@ -125,7 +125,8 @@ class Recipe:
     sync_bn: bool = True
     aug: Augment = DEFAULT_AUG
     final_aug: Augment = CLEAN_AUG
-    decode: Decode = DEPLOY
+    decode: Decode = DEPLOY         # evaluation (COCO AP), recorded in the checkpoint
+    predict: PredictDecode = PREDICT  # what a prediction call uses, recorded alongside
 
     def __post_init__(self):
         assert self.optimizer in ("sgd", "adamw", "musgd"), self.optimizer

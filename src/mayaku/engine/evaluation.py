@@ -337,7 +337,8 @@ def evaluate_runner(runner, images, annotations, batch=16, log=None) -> dict[str
         for i in range(0, len(files), batch):
             if log and i and i % (100 * batch) == 0:
                 log("eval %d/%d" % (i, len(files)))
-            yield from zip(ids[i:i + batch], runner.batch(files[i:i + batch], encode_mask=rle_crops),
+            yield from zip(ids[i:i + batch], runner.batch(files[i:i + batch], encode_mask=rle_crops,
+                                                       decode="eval"),
                            strict=True)
 
     return score(ann, detections(), cat_ids,

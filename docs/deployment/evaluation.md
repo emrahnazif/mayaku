@@ -29,7 +29,7 @@ mayaku eval best.pt     --annotations data/test/_annotations.coco.json --images 
 mayaku eval model.onnx  --annotations data/test/_annotations.coco.json --images data/test
 ```
 
-The model is scored with its recorded post-processing, which by default uses a score threshold of 0.001 (see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)). This is the standard way to compute COCO AP.
+The model is scored with its recorded post-processing, which by default uses a score threshold of 0.001, not the prediction default of 0.4 (see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)). This is the standard way to compute COCO AP.
 
 ## Arguments
 

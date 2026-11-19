@@ -91,7 +91,7 @@ mayaku predict WEIGHTS IMAGE [--conf C] [--output FILE] [--device D]
 |---|---|
 | `WEIGHTS` | Checkpoint, hosted model name or exported file. |
 | `IMAGE` | Image file. |
-| `--conf C` | Score threshold. Default: the model's recorded one, usually `0.001`, which returns many low-score detections. Pass a value such as `0.25` for practical output. |
+| `--conf C` | Score threshold. Default: the model's prediction threshold, `0.4` unless it records its own (see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)). |
 | `--output FILE` | Write the JSON to a file instead of printing it. |
 | `--device D` | `auto` (default), `cuda`, `mps` or `cpu`. |
 

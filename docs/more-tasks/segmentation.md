@@ -81,7 +81,7 @@ det.masks[0].sum() # pixel area of the first object's mask
 
 - `det.masks[i]` belongs to `det.boxes[i]`, `det.scores[i]` and `det.labels[i]`.
 - Masks have the original image's height and width, not the canvas size.
-- Full-resolution masks of many detections use a lot of memory on large images. Raise the score threshold to keep fewer, for example `predictor("photo.jpg", conf=0.25)`.
+- Full-resolution masks of many detections use a lot of memory on large images. Raise the score threshold to keep fewer, for example `predictor("photo.jpg", conf=0.5)`.
 
 Save a mask as an image:
 

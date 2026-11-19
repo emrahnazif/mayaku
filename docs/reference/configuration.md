@@ -174,15 +174,20 @@ Classifiers use `hflip`, `vflip` and `hsv`, plus their own random crop, which is
 
 ### Decode settings
 
-Post-processing used during evaluation and saved into the checkpoint for prediction and export.
+Post-processing saved into the checkpoint. `train.decode` is what evaluation uses (COCO AP needs every detection); `train.predict` is what a prediction call uses.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `train.decode.conf` | `0.001` | Minimum score. Low, as COCO AP needs. You can override it on each prediction call with `conf=`. |
-| `train.decode.iou` | `0.7` | NMS overlap threshold. |
+| `train.decode.conf` | `0.001` | Minimum score for evaluation. Low, as COCO AP needs. |
+| `train.decode.iou` | `0.7` | NMS overlap threshold for evaluation. |
 | `train.decode.max_det` | `300` | Maximum detections per image. |
 | `train.decode.topk` | `1000` | Candidates kept before NMS. |
 | `train.decode.multi_label` | `true` | Allow one box to be reported under several classes. |
+| `train.predict.conf` | `0.4` | Minimum score for predictions. You can override it on each call with `conf=`. |
+| `train.predict.iou` | `0.5` | NMS overlap threshold for predictions. |
+| `train.predict.max_det` | `300` | Maximum detections per image. |
+| `train.predict.topk` | `1000` | Candidates kept before NMS. |
+| `train.predict.multi_label` | `false` | Each location gives at most its best class. |
 
 See [Prediction: the score threshold](/mayaku/deployment/prediction/#the-score-threshold).
 

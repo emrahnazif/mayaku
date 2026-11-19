@@ -25,7 +25,7 @@ mayaku eval model.onnx --annotations data/test/_annotations.coco.json --images d
 from mayaku import from_pretrained
 
 predictor = from_pretrained("model.onnx")
-det = predictor("photo.jpg", conf=0.25)
+det = predictor("photo.jpg")
 ```
 
 ## Targets

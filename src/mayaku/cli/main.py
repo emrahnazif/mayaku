@@ -119,7 +119,8 @@ def _predict(
     weights: str = typer.Argument(..., help=_WEIGHTS_HELP),
     image: Path = typer.Argument(..., exists=True, dir_okay=False),
     conf: float | None = typer.Option(
-        None, "--conf", help="Score threshold; default the model's recorded one."),
+        None, "--conf", help="Score threshold; default the model's prediction setting (0.4 unless "
+             "it records its own)."),
     output: Path | None = typer.Option(None, "--output", help="Write the JSON here."),
     device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
 ) -> None:

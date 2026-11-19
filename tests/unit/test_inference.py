@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import warnings
 
 import pytest
 import torch
@@ -14,7 +15,15 @@ from torchvision.ops import box_iou
 from mayaku.config import InputConfig, KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.batch import batch_to
 from mayaku.inference import ArtifactPredictor, Predictor, from_pretrained
-from mayaku.inference.decode import decode_sidecar, host_side
+from mayaku.inference.decode import (
+    DEPLOY,
+    PREDICT,
+    PredictDecode,
+    decode,
+    decode_sidecar,
+    host_side,
+    predict_decode,
+)
 from mayaku.inference.export import TARGETS, export, open_session
 from mayaku.inference.export.metadata import embed_sidecar, read_sidecar, strip_tensorrt_header
 from mayaku.inference.preprocess import letterbox_batch
@@ -70,6 +79,60 @@ def onnx_path(predictor, tmp_path_factory):
     return predictor.export("onnx", tmp_path_factory.mktemp("onnx") / "model.onnx")
 
 
+def test_prediction_decodes_with_the_predict_block(run, predictor) -> None:
+    """A call decodes with the sidecar's "predict" block (`PREDICT`), stated
+    in a warning; the recorded "decode" block (conf 0.3 in this fixture) is
+    the evaluation's, `decode="eval"`; `conf` overrides either."""
+    files = run[2]
+    sc = predictor.sidecar
+    assert PredictDecode.from_sidecar(sc["predict"]) == PREDICT == predict_decode(sc)
+    with pytest.warns(UserWarning, match="conf 0.4, NMS IoU 0.5"):
+        for conf, floor in ((None, PREDICT.conf), (0.02, 0.02)):
+            for g in predictor.batch(files, conf=conf):
+                assert (g.scores >= floor).all()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                # the eval decode is not announced
+        for g in predictor.batch(files, conf=0.02, decode="eval"):
+            assert (g.scores >= 0.02).all()
+        for g in predictor.batch(files, decode="eval"):
+            assert (g.scores >= sc["decode"]["conf"]).all()
+    x, metas = letterbox_batch(files, predictor.canvas)
+    want = decode_sidecar(predictor._forward(x), metas, sc, None, None, "predict")
+    loose = decode(predictor._forward(x), metas, len(predictor.class_names), sc["decode"]["reg_max"],
+                   seg=True, kpt=3, d=dataclasses.replace(PREDICT, iou=0.7))
+    for g, w, wide in zip(predictor.batch(files), want, loose, strict=True):
+        assert torch.equal(g.boxes, w.boxes) and torch.equal(g.labels, w.labels)
+        assert len(g) <= len(wide)                    # NMS 0.5 keeps no more than 0.7
+    with pytest.raises(ValueError, match="predict"):
+        predictor(files[0], decode="coco")
+
+
+def test_predict_decode_of_a_checkpoint_without_a_predict_block() -> None:
+    """Checkpoints written before the "predict" block (the hosted ones) get
+    `PREDICT`; a block, when present, is used as recorded."""
+    rec = {"strides": [8, 16, 32], "reg_max": 16, **dataclasses.asdict(DEPLOY)}
+    assert predict_decode({"decode": rec}) == PREDICT
+    own = {"conf": 0.6, "iou": 0.6, "max_det": 20, "topk": 500, "multi_label": True}
+    assert predict_decode({"decode": rec, "predict": own}) == PredictDecode(**own)
+
+
+def test_a_partial_predict_config_keeps_the_predict_defaults() -> None:
+    """Setting only some `train.predict` fields keeps `PREDICT`'s others,
+    not the evaluation's (`DEPLOY`)."""
+    cfg = MayakuConfig.model_validate({"train": {"predict": {"conf": 0.3}}})
+    assert cfg.train.predict == dataclasses.replace(PREDICT, conf=0.3)
+    assert MayakuConfig().train.predict == PREDICT and MayakuConfig().train.decode == DEPLOY
+
+
+def test_predict_settings_stay_out_of_the_recorded_config(predictor, run) -> None:
+    """The "predict" block is the only copy, so versions that predate
+    `train.predict` still read the config; reading it back restores it."""
+    from mayaku.utils.checkpoint import read_deploy_checkpoint
+
+    assert "predict" not in predictor.sidecar["config"]["train"]
+    assert read_deploy_checkpoint(run[1])[1].train.predict == PREDICT
+
+
 def test_decode_runs_on_the_cpu_off_cuda() -> None:
     """`host_side` (the first step of `decode`) keeps CUDA tensors where they
     are and brings every other device's to the CPU, where MPS's decode is
@@ -86,7 +149,7 @@ def test_predictor_matches_the_evaluation_path(run, predictor) -> None:
     """Image files through the Predictor give exactly the detections the
     dataset's eval path + decode give: same preprocessing, same decode."""
     ds, _, files = run
-    got = predictor.batch(files)
+    got = predictor.batch(files, decode="eval")
     samples = [ds[i] for i in range(len(files))]
     x = batch_to(torch.stack([s["img"] for s in samples]), "cpu")
     want = decode_sidecar(predictor.model(x), [s["meta"] for s in samples], predictor.sidecar)
@@ -180,9 +243,10 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
     # an int8 artifact runs the int8 graph, so it is held to the Torch int8
     # simulation, not to the float model (on this barely trained model many
     # detections sit at the threshold, where int8 rounding moves the count)
+    # the recorded decode (conf 0.3, multi-label), as before prediction defaults existed
     with qdq_export(predictor.model) if precision == "int8" else contextlib.nullcontext():
-        want = predictor.batch(run[2])
-    got = a.batch(run[2])
+        want = predictor.batch(run[2], decode="eval")
+    got = a.batch(run[2], decode="eval")
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
     if target == "tensorrt":    # the first call records a CUDA graph, later calls replay it
         s = open_session(path, a.sidecar, "cuda")
