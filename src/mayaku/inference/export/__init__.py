@@ -66,10 +66,11 @@ TARGETS = {t: Target(s, importlib.import_module(f"mayaku.inference.export.{t}"))
 # and the flips compound over the stack, so the trained simulation itself run
 # in float64 instead of float32 moves by about 3% (tier n); no int8 runtime
 # can match it closer than that. The parity input is uniform noise, harsher on
-# int8 than any image: a TensorRT 11 engine of COCO nano (fp16 graph around
-# the Q/DQ pairs) sits at 10.8% there, and 0.26 AP from its fp16 engine on
-# COCO val.
-_TOLERANCE = {"fp32": 1e-3, "fp16": 1e-2, "int8": 1.5e-1}
+# int8 than any image: exports of trained models sit between 10% and 17% there
+# (the street nano: ONNX Runtime 14.4-15.4%, OpenVINO 13.3-13.6% over three
+# seeds, 43.9 AP against 44.2 fp32 on its val). A broken conversion is off by
+# about 100%.
+_TOLERANCE = {"fp32": 1e-3, "fp16": 1e-2, "int8": 2e-1}
 
 # Where each target's parity runs: the compute it deploys on. Core ML pinned to
 # its CPU runs fp16 with fp16 accumulation, its least accurate path (several

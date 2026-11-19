@@ -52,7 +52,7 @@ Without `--output`, the file is written next to the checkpoint with the target's
 1. Loads the checkpoint on the CPU and builds its deployment graph at the model's canvas size.
 2. Writes the file for the target and precision.
 3. Embeds the model's description in the file's metadata: class names, canvas, preprocessing, post-processing values, task settings, precision. This is why an exported file needs no config.
-4. **Checks the file.** It runs the exported file once in its runtime and compares the raw outputs with the PyTorch model on the same input. If they differ by more than the tolerance (0.1% RMS for fp32, 1% for fp16, 15% for int8), export fails with an error like `model.mlpackage: coreml fp16 outputs differ from the Torch model by 3.20% RMS (tolerance 1.0%)`. The file is not returned as a success.
+4. **Checks the file.** It runs the exported file once in its runtime and compares its raw outputs with the PyTorch model's on the same input. This catches a broken conversion, such as wrong weights or swapped outputs. A broken file fails export with an error, and the file is not returned as a success. The check is not an accuracy measure: int8 exports score within 0.3 AP of the fp32 model, for example 44.2 AP fp32 and 43.9 AP int8.
 
 The check is skipped, with the file still written, only when the target's runtime can't run on this machine: Core ML anywhere but macOS. TensorRT export always needs a CUDA GPU, both to build the engine and to check it.
 
