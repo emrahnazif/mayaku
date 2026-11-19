@@ -9,7 +9,15 @@ import torch
 
 from mayaku.data.coco import load_coco
 from mayaku.data.geometry import unletterbox
-from mayaku.engine.evaluation import coco_ap, evaluate, score, to_coco, to_coco_segm
+from mayaku.engine import evaluation as evlib
+from mayaku.engine.evaluation import (
+    coco_ap,
+    evaluate,
+    operating_point,
+    score,
+    to_coco,
+    to_coco_segm,
+)
 from mayaku.inference.decode import DEPLOY, Detections, postprocess
 from mayaku.model import STRIDES, TINY, Detector
 
@@ -234,3 +242,58 @@ def test_a_mask_model_on_box_only_ground_truth_scores_boxes_only(tmp_path) -> No
         dets.append((coco.ids[i], _as_detections(labels, torch.ones(len(labels), 8, 8, dtype=torch.bool))))
     out = score(coco.ann_path, dets, coco.cat_ids, seg=True)
     assert out["AP"] > 0.999 and not any(k.startswith("segm_") for k in out)
+
+
+def _operating_split(tmp_path, n_img, seed=0):
+    """`n_img` images with 10 separated objects each, one detection on every
+    object (score uniform 0.1-0.9) and 6 false ones per image (0.1-0.5)."""
+    import json
+    g = torch.Generator().manual_seed(seed)
+    images, anns, results = [], [], []
+    for i in range(n_img):
+        images.append({"id": i, "file_name": f"{i}.jpg", "width": 1000, "height": 100})
+        for k in range(10):
+            box = [100.0 * k + 10, 10.0, 50.0, 50.0]
+            anns.append({"id": len(anns) + 1, "image_id": i, "category_id": 1, "bbox": box,
+                         "area": 2500.0, "iscrowd": 0})
+            results.append({"image_id": i, "category_id": 1, "bbox": box,
+                            "score": 0.1 + 0.8 * float(torch.rand(1, generator=g))})
+        for k in range(6):
+            results.append({"image_id": i, "category_id": 1, "bbox": [100.0 * k + 70, 60.0, 20.0, 20.0],
+                            "score": 0.1 + 0.4 * float(torch.rand(1, generator=g))})
+    path = tmp_path / f"op{n_img}.json"
+    path.write_text(json.dumps({"images": images, "annotations": anns,
+                                "categories": [{"id": 1, "name": "thing"}]}))
+    return str(path), results
+
+
+def test_operating_point_picks_the_best_f1(tmp_path) -> None:
+    """Against a brute-force count per threshold: true detections are the
+    ones on an object, the others false; the pick is the grid value with the
+    best F1."""
+    ann, results = _operating_split(tmp_path, 80)
+    got = operating_point(ann, results)
+    n_gt, curve = 800, []
+    for t in evlib.OPERATING_GRID:
+        kept = [r for r in results if r["score"] >= t]
+        tp = sum(r["bbox"][1] == 10.0 for r in kept)
+        p, r = tp / len(kept), tp / n_gt
+        curve.append((t, p, r, 2 * p * r / (p + r)))
+    want = max(curve, key=lambda c: (c[3], c[0]))
+    assert got["predict_conf"] == want[0]
+    assert got["predict_precision"] == pytest.approx(want[1])
+    assert got["predict_recall"] == pytest.approx(want[2])
+    assert got["predict_f1"] == pytest.approx(want[3])
+
+
+def test_operating_point_applies_the_prediction_nms_and_needs_enough_objects(tmp_path) -> None:
+    """A lower-scoring copy of each true box is removed by NMS at 0.5 and is
+    a false detection when NMS lets it through; a small split gives None."""
+    ann, results = _operating_split(tmp_path, 80)
+    dup = [{**r, "bbox": [r["bbox"][0] + 2, *r["bbox"][1:]], "score": r["score"] * 0.95}
+           for r in results if r["bbox"][1] == 10.0]
+    clean, loose = operating_point(ann, results + dup, 0.5), operating_point(ann, results + dup, 0.95)
+    assert clean == operating_point(ann, results)
+    assert loose["predict_precision"] < clean["predict_precision"]
+    small, res = _operating_split(tmp_path, evlib.OPERATING_MIN_GT // 10 - 1)
+    assert operating_point(small, res) is None

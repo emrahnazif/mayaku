@@ -183,7 +183,7 @@ Post-processing saved into the checkpoint. `train.decode` is what evaluation use
 | `train.decode.max_det` | `300` | Maximum detections per image. |
 | `train.decode.topk` | `1000` | Candidates kept before NMS. |
 | `train.decode.multi_label` | `true` | Allow one box to be reported under several classes. |
-| `train.predict.conf` | `0.4` | Minimum score for predictions. You can override it on each call with `conf=`. |
+| `train.predict.conf` | `0.4` | Minimum score for predictions. Left at the default, it is chosen on the validation split at the end of training; set it to keep your own. You can override it on each call with `conf=`. |
 | `train.predict.iou` | `0.5` | NMS overlap threshold for predictions. |
 | `train.predict.max_det` | `300` | Maximum detections per image. |
 | `train.predict.topk` | `1000` | Candidates kept before NMS. |

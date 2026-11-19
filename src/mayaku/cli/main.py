@@ -24,7 +24,7 @@ from typing import Any
 import pydantic
 import typer
 
-from mayaku.api import evaluate, train
+from mayaku.api import evaluate, train, tune_predict
 from mayaku.config import parse_assignments
 from mayaku.engine.evaluation import rle
 from mayaku.inference import Detections, Predictor, from_pretrained
@@ -162,6 +162,24 @@ def _export(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(str(out))
+
+
+@app.command("tune-predict")
+def _tune_predict(
+    weights: str = typer.Argument(..., help="A checkpoint or a hosted model name."),
+    annotations: Path = typer.Option(..., "--annotations", exists=True, dir_okay=False,
+                                     help="COCO annotation JSON of a validation split."),
+    images: Path = typer.Option(..., "--images", exists=True, file_okay=False, help="Image directory."),
+    output: Path | None = typer.Option(
+        None, "--output", help="Write the tuned checkpoint here instead of in place."),
+    device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
+) -> None:
+    """Choose the prediction score threshold on a validation split and record
+    it in the checkpoint, as training does at its end."""
+    metrics = tune_predict(weights, annotations=annotations, images=images, output=output,
+                           device=device)
+    typer.echo(json.dumps({k: v for k, v in metrics.items() if k.startswith("predict_")} or
+                          {"predict_conf": None}, indent=2))
 
 
 @app.command("download")

@@ -183,7 +183,7 @@ With `val_annotations` and `val_images` (`--val-annotations` and `--val-images`)
   ```text
   epoch  41  box 0.812 cls 0.655 dfl 0.901  AP 0.6123  AP50 0.8540  AP75 0.6702  S 0.3120  M 0.5874  L 0.7012
   ```
-- `best.pt` is kept, and after training it is scored once more through the same code path a deployment uses. The result goes to `eval/metrics.json` and `result["metrics"]`.
+- `best.pt` is kept, and after training it is scored once more through the same code path a deployment uses. The result goes to `eval/metrics.json` and `result["metrics"]`. The same pass chooses the prediction threshold and writes it into `best.pt` (`predict_conf` in the metrics; see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)).
 
 Without a validation split, the run trains without scoring, writes no `best.pt`, and `last.pt` is the result. `result["metrics"]` is `None`.
 

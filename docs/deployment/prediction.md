@@ -57,13 +57,17 @@ dets = predictor.batch([img1, img2], conf=None, decode="predict")   # several im
 
 ### The score threshold
 
-A prediction keeps detections scoring at least **0.4**, removes a box that overlaps a higher-scoring box of the same class by more than **0.5** IoU (NMS), and gives each location at most its best class. The first prediction states these settings once as a Python warning. Pass `conf` to change the threshold for one call:
+A prediction keeps detections scoring at least the model's **prediction threshold**, removes a box that overlaps a higher-scoring box of the same class by more than **0.5** IoU (NMS), and gives each location at most its best class. The first prediction states these settings once as a Python warning. Pass `conf` to change the threshold for one call:
 
 ```python
 det = predictor("photo.jpg", conf=0.5)
 ```
 
 `mayaku predict` takes the same value as `--conf 0.5`.
+
+**The threshold is chosen when the model is trained.** At the end of training, the final weights are scored on the validation split, and the same pass measures precision and recall at every threshold from 0.1 to 0.7 in steps of 0.05. The checkpoint records the threshold with the best F1, the balance of precision and recall. Training logs the choice, for example `prediction threshold 0.25 (precision 0.806, recall 0.684, F1 0.740 on the validation split)`, and keeps it in the checkpoint as `predictor.sidecar["predict"]["conf"]`, with how it was chosen in `predictor.sidecar["predict_tuned"]`. Models whose scores are spread over many classes get a lower threshold (the Objects365 nano gets 0.2); confident fine-tuned models usually get 0.4 to 0.7. On the 100 RF100-VL datasets, the threshold picked on each validation split gave up 0.006 F1 on its test split against the best possible threshold, a fixed 0.4 gave up 0.008, and validation splits of only 100 to 500 objects still picked better than 0.4. Without a validation split, or with fewer than 50 validation objects, the threshold stays at **0.4**. If you prefer fewer false detections to more found objects, set a higher threshold yourself. A threshold you set in the config (`train.predict.conf`) is kept. `mayaku tune-predict` runs the same choice on an existing checkpoint (see [Command line](/mayaku/reference/cli/#mayaku-tune-predict)).
+
+The chosen value reflects the validation split. Missing labels in it count as false detections and lower the threshold; a split unlike your footage may suit a different one.
 
 A higher threshold gives fewer false detections and misses more real objects. On the street models' validation set, 0.25 finds 68% of the objects with 81% of the detections correct; 0.4 finds 61% with 90% correct; 0.5 finds 55% with 94% correct. Objects that score near the threshold also appear and disappear more between video frames. A tracker that uses low-scoring detections to keep its tracks alive, such as ByteTrack, needs a lower threshold, for example `conf=0.1`.
 
@@ -79,7 +83,7 @@ det = predictor("photo.jpg", decode="eval")
 
 | Value | Prediction (`train.predict`) | Evaluation (`train.decode`) | Meaning |
 |---|---|---|---|
-| `conf` | `0.4` | `0.001` | Minimum score. You can override it on each call with `conf=`. |
+| `conf` | chosen at the end of training, else `0.4` | `0.001` | Minimum score. You can override it on each call with `conf=`. |
 | `iou` | `0.5` | `0.7` | Overlap above which NMS removes the lower-scoring of two same-class boxes. |
 | `max_det` | `300` | `300` | Maximum detections per image. |
 | `topk` | `1000` | `1000` | Candidates kept before NMS. |

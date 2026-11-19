@@ -1,17 +1,18 @@
 ---
 title: Command-line reference
-summary: Every mayaku command and option: train, eval, predict, export and download.
+summary: Every mayaku command and option: train, eval, predict, export, tune-predict and download.
 label: Command line
 keywords: mayaku, cli, command line, train, export
 ---
 
-The `mayaku` command has five subcommands. `python -m mayaku.cli` is the same program.
+The `mayaku` command has six subcommands. `python -m mayaku.cli` is the same program.
 
 ```text
 mayaku train    [CONFIG] --images DIR [options]     train a model
 mayaku eval     WEIGHTS --images DIR [options]      score a model on a labeled split
 mayaku predict  WEIGHTS IMAGE [options]             run a model on one image, print JSON
 mayaku export   TARGET WEIGHTS [options]            write a deployment file
+mayaku tune-predict WEIGHTS --annotations F --images DIR   choose the prediction threshold
 mayaku download [NAME] [options]                    fetch hosted pretrained models
 ```
 
@@ -91,7 +92,7 @@ mayaku predict WEIGHTS IMAGE [--conf C] [--output FILE] [--device D]
 |---|---|
 | `WEIGHTS` | Checkpoint, hosted model name or exported file. |
 | `IMAGE` | Image file. |
-| `--conf C` | Score threshold. Default: the model's prediction threshold, `0.4` unless it records its own (see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)). |
+| `--conf C` | Score threshold. Default: the model's prediction threshold, chosen on its validation split at the end of training, else `0.4` (see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)). |
 | `--output FILE` | Write the JSON to a file instead of printing it. |
 | `--device D` | `auto` (default), `cuda`, `mps` or `cpu`. |
 
@@ -111,6 +112,24 @@ mayaku export TARGET WEIGHTS [--output FILE] [--precision P]
 | `--precision P` | `fp32`, `fp16` or `int8`, as the target supports. Default: `fp32` for ONNX and OpenVINO, `fp16` for Core ML and TensorRT. |
 
 Prints the path written.
+
+## mayaku tune-predict
+
+Choose a checkpoint's prediction score threshold on a labeled split and record it in the checkpoint, the step training runs at its end. Use it for a checkpoint trained without a validation split, a hosted model, or to tune for your own data. See [Prediction](/mayaku/deployment/prediction/#the-score-threshold).
+
+```bash
+mayaku tune-predict WEIGHTS --annotations FILE --images DIR [--output FILE] [--device D]
+```
+
+| Argument / option | Meaning |
+|---|---|
+| `WEIGHTS` | Checkpoint (`.pt` / `.pth`) or hosted model name. Export after tuning: an exported file carries the threshold its checkpoint had. |
+| `--annotations FILE` | COCO JSON of the split. It needs at least 50 objects; with fewer, nothing is written. |
+| `--images DIR` | Its images. |
+| `--output FILE` | Write the tuned checkpoint here. Default: change the checkpoint in place. |
+| `--device D` | `auto` (default), `cuda`, `mps` or `cpu`. |
+
+Prints the chosen threshold with its precision, recall and F1.
 
 ## mayaku download
 

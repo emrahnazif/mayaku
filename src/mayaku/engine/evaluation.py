@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from mayaku.data.batch import batch_to, collate
-from mayaku.inference.decode import DEPLOY, decode
+from mayaku.inference.decode import DEPLOY, decode, predict_decode
 from mayaku.model import kpt as kptlib
 from mayaku.model import obb as obblib
 
@@ -32,6 +32,13 @@ KPT_STATS = ("AP", "AP50", "AP75", "AP-M", "AP-L",
 
 # a classifier's scores: top-1 and top-5 accuracy
 CLS_STATS = ("top1", "top5")
+
+# The prediction score threshold `operating_point` picks: the grid value
+# with the best validation F1. On the 100 RF100-VL datasets it gave up 0.006
+# test F1 against each test split's best threshold (a fixed 0.4: 0.008),
+# and validation splits of 100-500 objects still beat 0.4.
+OPERATING_GRID = tuple(round(0.1 + 0.05 * i, 2) for i in range(13))   # 0.1 .. 0.7
+OPERATING_MIN_GT = 50
 
 
 def to_coco(det, image_id, cat_ids):
@@ -226,13 +233,75 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
     return dict(zip(stats, [float(v) for v in e.stats[:len(stats)]], strict=True))
 
 
-def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
+def operating_point(ann_path, results, iou=0.5):
+    """The prediction score threshold for box result records on `ann_path`,
+    as ``{"predict_conf", "predict_precision", "predict_recall",
+    "predict_f1"}``, or None when the split has fewer than
+    `OPERATING_MIN_GT` objects.
+
+    The records are a COCO evaluation's (every detection down to its low
+    threshold), so one pass gives precision and recall at every threshold:
+    per image, NMS at the prediction's `iou`, then each detection in score
+    order matches the unmatched same-class object it overlaps most at IoU
+    >= 0.5 or counts as false. Greedy in score order, a detection's match
+    never depends on the lower-scoring ones a threshold drops. Crowd
+    regions are left out. The pick is the `OPERATING_GRID` value with the
+    best F1, the higher one on a tie."""
+    from torchvision.ops import box_convert, box_iou
+
+    from mayaku.backends.ops.nms import batched_nms
+
+    gt = ground_truth(ann_path)
+    anns = {i: [a for a in gt.imgToAnns[i] if not a.get("iscrowd", 0)] for i in gt.imgs}
+    n_gt = sum(map(len, anns.values()))
+    if n_gt < OPERATING_MIN_GT:
+        return None
+    dets: dict[int, list] = {}
+    for r in results:
+        if r["score"] >= OPERATING_GRID[0]:
+            dets.setdefault(r["image_id"], []).append(r)
+
+    def xyxy(rows):
+        return box_convert(torch.tensor([r["bbox"] for r in rows], dtype=torch.float32).reshape(-1, 4),
+                           "xywh", "xyxy")
+
+    scores, hits = [], []
+    for img_id, rows in dets.items():
+        box, sc = xyxy(rows), torch.tensor([r["score"] for r in rows], dtype=torch.float32)
+        cat = torch.tensor([r["category_id"] for r in rows])
+        keep = batched_nms(box, sc, cat, iou)            # by score, highest first
+        box, sc, cat = box[keep], sc[keep], cat[keep]
+        g = anns.get(img_id, [])
+        same = cat[:, None] == torch.tensor([a["category_id"] for a in g], dtype=cat.dtype)[None]
+        u = (box_iou(box, xyxy(g)) * same).numpy()
+        taken = np.zeros(u.shape[1], bool)
+        for j in range(len(box)):
+            row = np.where(taken, 0.0, u[j])
+            hit = u.shape[1] > 0 and row.max() >= 0.5
+            if hit:
+                taken[row.argmax()] = True
+            hits.append(hit)
+        scores.append(sc.numpy())
+    s = np.concatenate(scores) if scores else np.zeros(0, np.float32)
+    order = np.argsort(-s, kind="stable")
+    s, tp = s[order], np.cumsum(np.asarray(hits, bool)[order])
+    curve = []
+    for t in OPERATING_GRID:
+        n = int(np.searchsorted(-s, -t, side="right"))     # detections scoring >= t
+        p, r = (tp[n - 1] / n, tp[n - 1] / n_gt) if n else (1.0, 0.0)
+        curve.append((t, float(p), float(r), 2 * p * r / (p + r) if p + r else 0.0))
+    t, p, r, f = max(curve, key=lambda c: (c[3], c[0]))
+    return {"predict_conf": t, "predict_precision": p, "predict_recall": r, "predict_f1": float(f)}
+
+
+def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, operating=None):
     """COCO metrics for `(image_id, Detections)` pairs: box AP, plus mask AP
     under "segm_" and keypoint AP under "kpt_" when the model has those heads
     (mask AP only when the ground truth has masks).
     Keypoints are scored against `kpt_ann_path` when the file is separate.
     Oriented boxes (detections with `rboxes`) are scored by their rotated
-    IoU."""
+    IoU. `operating`, a prediction NMS IoU, adds the prediction threshold
+    `operating_point` picks with it (axis-aligned boxes only)."""
     seg = seg and has_masks(ann_path)
     results, segm, kpts = [], [], []
     for image_id, det in detections:
@@ -242,6 +311,8 @@ def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
         if kpt:
             kpts += to_coco_kpt(det, image_id, cat_ids)
     out = coco_ap(ann_path, results)
+    if operating is not None and results and "rbox" not in results[0]:
+        out.update(operating_point(ann_path, results, operating) or {})
     if seg:
         out.update({"segm_" + k: v for k, v in coco_ap(ann_path, segm, "segm").items()})
     if kpt:
@@ -316,11 +387,14 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
         model.train(was_training)
 
 
-def evaluate_runner(runner, images, annotations, batch=16, log=None) -> dict[str, float]:
+def evaluate_runner(runner, images, annotations, batch=16, log=None,
+                    operating=False) -> dict[str, float]:
     """COCO metrics for a deployed detector -- a `mayaku.inference.Runner`,
     so a checkpoint and its exported artifacts score through their own
     preprocessing, graph and precision -- on the split `annotations` /
-    `images`. `log` receives a progress line every 100 batches."""
+    `images`. `log` receives a progress line every 100 batches; `operating`
+    adds the prediction threshold picked at the model's own prediction NMS
+    (`score`)."""
     import os
 
     ann = str(annotations)
@@ -342,7 +416,8 @@ def evaluate_runner(runner, images, annotations, batch=16, log=None) -> dict[str
                            strict=True)
 
     return score(ann, detections(), cat_ids,
-                 seg=runner.sidecar["mask"] is not None, kpt=kp["num"] if kp else 0)
+                 seg=runner.sidecar["mask"] is not None, kpt=kp["num"] if kp else 0,
+                 operating=predict_decode(runner.sidecar).iou if operating else None)
 
 
 def evaluate_runner_classifier(runner, images, batch=16, log=None) -> dict[str, float]:

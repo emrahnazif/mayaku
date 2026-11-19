@@ -17,6 +17,7 @@ the two cannot disagree.
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -165,6 +166,32 @@ def sidecar_config(sidecar: Mapping[str, Any]) -> MayakuConfig:
         model["qat_activations"] = "affine"
     train = {**(cfg.get("train") or {}), **({"predict": sidecar["predict"]} if sidecar.get("predict") else {})}
     return MayakuConfig.model_validate({**cfg, "model": model, "train": train})
+
+
+def atomic_save(obj: Any, path: str | Path) -> None:
+    """`torch.save` to a temporary file renamed over `path`, so a crash
+    mid-save keeps the previous file."""
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def set_predict_conf(path: str | Path, conf: float, out: str | Path | None = None,
+                     note: Mapping[str, Any] | None = None) -> Path:
+    """Write a prediction score threshold into a checkpoint's "predict"
+    block (made from `predict_decode` when the checkpoint predates it), in
+    place or to `out`; `note` (how it was chosen) is kept beside it as
+    "predict_tuned". The weights are copied untouched."""
+    from mayaku.inference.decode import predict_decode
+
+    sidecar, state = load_checkpoint(Path(path))
+    sidecar = dict(check_sidecar(sidecar, str(path)))
+    sidecar["predict"] = {**dataclasses.asdict(predict_decode(sidecar)), "conf": float(conf)}
+    if note is not None:
+        sidecar["predict_tuned"] = dict(note)
+    dest = Path(out) if out is not None else Path(path)
+    atomic_save({"model": state, SIDECAR_KEY: sidecar}, dest)
+    return dest
 
 
 def select_final_weights(train_dir: Path) -> Path:
