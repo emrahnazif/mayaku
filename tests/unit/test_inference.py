@@ -14,7 +14,7 @@ from torchvision.ops import box_iou
 from mayaku.config import InputConfig, KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.batch import batch_to
 from mayaku.inference import ArtifactPredictor, Predictor, from_pretrained
-from mayaku.inference.decode import decode_sidecar
+from mayaku.inference.decode import decode_sidecar, host_side
 from mayaku.inference.export import TARGETS, export, open_session
 from mayaku.inference.export.metadata import embed_sidecar, read_sidecar, strip_tensorrt_header
 from mayaku.inference.preprocess import letterbox_batch
@@ -68,6 +68,18 @@ def predictor(run):
 @pytest.fixture(scope="module")
 def onnx_path(predictor, tmp_path_factory):
     return predictor.export("onnx", tmp_path_factory.mktemp("onnx") / "model.onnx")
+
+
+def test_decode_runs_on_the_cpu_off_cuda() -> None:
+    """`host_side` (the first step of `decode`) keeps CUDA tensors where they
+    are and brings every other device's to the CPU, where MPS's decode is
+    several times faster."""
+    t = torch.zeros(2)
+    assert host_side([t])[0] is t
+    if torch.backends.mps.is_available():
+        assert host_side([t.to("mps")])[0].device.type == "cpu"
+    if torch.cuda.is_available():
+        assert host_side([t.cuda()])[0].is_cuda
 
 
 def test_predictor_matches_the_evaluation_path(run, predictor) -> None:

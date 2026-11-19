@@ -59,7 +59,8 @@ def rle_crops(masks, rects, shapes):
     """Masks that are False outside a rectangle each -> COCO RLEs of their
     whole frames: masks (n, H, W) bool, mask k at the top-left of its rect
     k = [y0, y1, x0, x1] in a frame of shapes[k] = (h, w) pixels (a host
-    sequence; `mayaku.model.mask.box_masks`'s chunks).
+    sequence; `mayaku.model.mask.box_masks`'s chunks), not on MPS, whose
+    int64 sort is wrong above 2**24 (`decode` hands CPU tensors there).
 
     COCO's runs are column-major. A run boundary falls at pixel p where p
     differs from p - 1 (and at pixel 0 when it is set); outside the

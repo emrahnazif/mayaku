@@ -77,6 +77,8 @@ The other post-processing values are recorded in the model when it is trained (f
 
 They are stored in `predictor.sidecar["decode"]`. Changing a value in that dict changes the predictor's later calls, for example `predictor.sidecar["decode"]["max_det"] = 50`.
 
+Post-processing runs on the GPU when the model runs on CUDA, and on the CPU otherwise, including on Apple GPUs (MPS), where the CPU is several times faster for this work.
+
 ## Detections
 
 Detection, segmentation, keypoint and oriented-box models return a `Detections` object for each image. Its tensors are on the CPU, use the original image's pixel coordinates, and are sorted by score, highest first.
