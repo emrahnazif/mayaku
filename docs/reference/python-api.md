@@ -1,9 +1,10 @@
----
-title: Python API reference
+# Python API reference
+
+<!--
 summary: Every public Mayaku function and class, with its signature, parameters and return value.
 label: Python API
 keywords: mayaku, python api, train, from_pretrained, detections
----
+-->
 
 The public API is the four functions in the top-level `mayaku` package, plus the classes and helpers listed below. Anything else under `mayaku.*` is internal and may change.
 
@@ -47,7 +48,7 @@ Trains a detector (detection, segmentation, keypoints, oriented boxes) from COCO
 | `resume` | path or `None` | `state.pt` or `train/` directory of a run to continue. |
 | `log` | callable | Receives each log line as a string. |
 
-Returns a dict with `final_weights` (`Path`), `output_dir` (`Path`), `metrics` (dict or `None`), `best` (dict or `None`), `train_seconds`, `eval_seconds` and `metadata`. See [Training](/mayaku/data-and-training/training/).
+Returns a dict with `final_weights` (`Path`), `output_dir` (`Path`), `metrics` (dict or `None`), `best` (dict or `None`), `train_seconds`, `eval_seconds` and `metadata`. See [Training](/docs/data-and-training/training.md).
 
 ## mayaku.evaluate
 
@@ -56,7 +57,7 @@ mayaku.evaluate(weights, *, annotations=None, images, output_dir=None,
                 device="auto", log=print) -> dict
 ```
 
-Scores a checkpoint, hosted model or exported file. Returns a flat dict of metrics: COCO metrics for detectors (`AP`, `AP50`, ..., plus `segm_*` / `kpt_*`), or `top1` and `top5` for classifiers, whose `annotations` must be `None`. With `output_dir`, it also writes `metrics.json` there. See [Evaluation](/mayaku/deployment/evaluation/).
+Scores a checkpoint, hosted model or exported file. Returns a flat dict of metrics: COCO metrics for detectors (`AP`, `AP50`, ..., plus `segm_*` / `kpt_*`), or `top1` and `top5` for classifiers, whose `annotations` must be `None`. With `output_dir`, it also writes `metrics.json` there. See [Evaluation](/docs/deployment/evaluation.md).
 
 ## mayaku.from_pretrained
 
@@ -69,7 +70,7 @@ Loads a model for prediction:
 - A checkpoint path or hosted model name gives a `Predictor`, which runs in PyTorch.
 - A path ending in `.onnx`, `.mlpackage`, `.xml` or `.engine` gives an `ArtifactPredictor`, which runs in that runtime.
 
-Both have the same interface. See [Prediction](/mayaku/deployment/prediction/).
+Both have the same interface. See [Prediction](/docs/deployment/prediction.md).
 
 ### Predictor and ArtifactPredictor
 
@@ -88,7 +89,7 @@ Both have the same interface. See [Prediction](/mayaku/deployment/prediction/).
 | Member | Meaning |
 |---|---|
 | `Predictor.from_checkpoint(path, device="auto")` | Load from a checkpoint file. A name is not downloaded here; use `from_pretrained` for that. |
-| `export(target="onnx", output=None, precision=None) -> Path` | Write an exported file. See [Export](/mayaku/deployment/export/#from-python). |
+| `export(target="onnx", output=None, precision=None) -> Path` | Write an exported file. See [Export](/docs/deployment/export.md#from-python). |
 | `model` | The underlying `torch.nn.Module`, in its deployment form. |
 | `device` | The `torch.device` it runs on. |
 
@@ -125,7 +126,7 @@ A dataclass, with one per image, on the CPU, in original-image pixels, sorted by
 mayaku.health_check(annotations, images, cfg=None) -> dict
 ```
 
-Scans one COCO split: counts, the canvas training would use (from `cfg`, default `MayakuConfig()`), object-size fractions, box aspect percentiles, class balance and warnings. See [Datasets](/mayaku/data-and-training/datasets/#health-check).
+Scans one COCO split: counts, the canvas training would use (from `cfg`, default `MayakuConfig()`), object-size fractions, box aspect percentiles, class balance and warnings. See [Datasets](/docs/data-and-training/datasets.md#health-check).
 
 ## mayaku.config
 
@@ -138,7 +139,7 @@ from mayaku.config import (
 
 | Name | Meaning |
 |---|---|
-| `MayakuConfig(model=..., input=..., train=..., dataloader=..., auto_config=...)` | The whole configuration. Sections accept dicts. Immutable (pydantic, frozen, unknown fields rejected). See [Configuration](/mayaku/reference/configuration/). |
+| `MayakuConfig(model=..., input=..., train=..., dataloader=..., auto_config=...)` | The whole configuration. Sections accept dicts. Immutable (pydantic, frozen, unknown fields rejected). See [Configuration](/docs/reference/configuration.md). |
 | `load_yaml(path) -> MayakuConfig` | Read and validate a YAML file. |
 | `read_yaml(path) -> (dict, MayakuConfig)` | The same, also returning the raw mapping as written. |
 | `dump_yaml(cfg, path)` / `to_yaml_string(cfg)` | Write a config as YAML. |
@@ -159,12 +160,12 @@ from mayaku.utils.download import download_model, list_models, list_revisions, r
 | `resolve_weights(weights) -> Path` | What `train`, `from_pretrained` and the CLI do with a weights argument: an existing file, else a download. |
 | `DownloadError` | Raised when a download or integrity check fails. |
 
-See [Models](/mayaku/data-and-training/models/#downloads).
+See [Models](/docs/data-and-training/models.md#downloads).
 
 ## Helpers for task outputs
 
 | Name | Meaning |
 |---|---|
-| `mayaku.model.obb.corners(rboxes)` | `(..., 5)` oriented boxes → `(..., 4, 2)` corner points. See [Oriented boxes](/mayaku/more-tasks/oriented-boxes/#predict). |
+| `mayaku.model.obb.corners(rboxes)` | `(..., 5)` oriented boxes → `(..., 4, 2)` corner points. See [Oriented boxes](/docs/more-tasks/oriented-boxes.md#predict). |
 | `mayaku.inference.export.metadata.read_sidecar(path, target)` | Read the embedded description of an exported file (`target`: `"onnx"`, `"coreml"`, `"openvino"`, `"tensorrt"`). |
 | `mayaku.inference.export.metadata.strip_tensorrt_header(path) -> bytes` | The plain engine bytes of a Mayaku `.engine` file. |

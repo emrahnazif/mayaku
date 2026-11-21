@@ -1,9 +1,10 @@
----
-title: Dataset formats for training
+# Dataset formats for training
+
+<!--
 summary: The COCO JSON fields each task reads, the class-folder layout for classification, and the dataset health check.
 label: Datasets
 keywords: mayaku, coco format, dataset, annotations, health check
----
+-->
 
 Mayaku reads two dataset formats:
 
@@ -75,7 +76,7 @@ Mayaku ignores every other field (`area`, `info`, `licenses`, `skeleton`, `super
 ### What is skipped
 
 - **Crowd annotations** (`iscrowd: 1`) are never trained on.
-- **Degenerate boxes**, with a width or height of 1 pixel or less, are dropped. [`health_check`](/mayaku/data-and-training/datasets/#health-check) counts them.
+- **Degenerate boxes**, with a width or height of 1 pixel or less, are dropped. [`health_check`](/docs/data-and-training/datasets.md#health-check) counts them.
 - **Images without annotations are kept.** They train as background: images where the model should find nothing.
 - **Unreadable images.** During training, a missing or corrupt image file is replaced by another random training image. During evaluation it stops with `eval image missing: <path>`.
 
@@ -88,7 +89,7 @@ Set by each annotation's `segmentation`:
 - **Polygons**: a list of polygons, each a flat `[x1, y1, x2, y2, ...]` list in pixels. An object in several pieces has several polygons. A polygon with fewer than 3 points is ignored.
 - **RLE**: a COCO run-length-encoded dict (`{"size": [h, w], "counts": ...}`). Mayaku converts it to polygons when loading.
 
-An annotation without a segmentation still trains its box, but has no mask to learn from. See [Instance segmentation](/mayaku/more-tasks/segmentation/).
+An annotation without a segmentation still trains its box, but has no mask to learn from. See [Instance segmentation](/docs/more-tasks/segmentation.md).
 
 ### Keypoints
 
@@ -97,11 +98,11 @@ An annotation without a segmentation still trains its box, but has no mask to le
 - An annotation with no `keypoints`, or with `num_keypoints: 0`, trains as a box with all keypoints unlabeled.
 - **Left/right pairs.** A horizontal flip, used as training augmentation, mirrors the image, so a left keypoint must become the right one. Mayaku derives these pairs from the names in `categories[].keypoints`: `left_X` pairs with `right_X`. With no names and `K = 17`, it uses the COCO person skeleton. Otherwise no keypoints are swapped.
 
-See [Keypoint detection](/mayaku/more-tasks/keypoints/).
+See [Keypoint detection](/docs/more-tasks/keypoints.md).
 
 ### Oriented boxes
 
-Oriented-box models learn from each object's polygon in `segmentation`. The training target is the smallest rotated rectangle around the polygon. An object without a polygon trains as its axis-aligned `bbox` at angle 0. See [Oriented boxes](/mayaku/more-tasks/oriented-boxes/).
+Oriented-box models learn from each object's polygon in `segmentation`. The training target is the smallest rotated rectangle around the polygon. An object without a polygon trains as its axis-aligned `bbox` at angle 0. See [Oriented boxes](/docs/more-tasks/oriented-boxes.md).
 
 ## Class folders
 
@@ -124,7 +125,7 @@ data/
 - The validation split may leave out classes, but it may not contain a class the training split lacks. That fails with `<dir> has classes the model does not know: [...]`.
 - There are no annotation files. Pass only `train_images` and `val_images` (or `--images` and `--val-images`).
 
-This is the layout `torchvision.datasets.ImageFolder` reads. See [Image classification](/mayaku/more-tasks/classification/).
+This is the layout `torchvision.datasets.ImageFolder` reads. See [Image classification](/docs/more-tasks/classification.md).
 
 ## Health check
 
@@ -152,7 +153,7 @@ report = mayaku.health_check("data/train/_annotations.coco.json", "data/train")
 ```
 
 - `object_size` sorts boxes into the COCO buckets (small: under 32×32 pixels; large: 96×96 and over), measured **after** resizing to `canvas`, which is the scale the model sees.
-- `canvas` is the input size [auto-config](/mayaku/data-and-training/training/#auto-config) picks for this data at the default size budget of 800. To check another budget, pass a config:
+- `canvas` is the input size [auto-config](/docs/data-and-training/training.md#auto-config) picks for this data at the default size budget of 800. To check another budget, pass a config:
 
   ```python
   import mayaku

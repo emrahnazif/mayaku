@@ -1,9 +1,10 @@
----
-title: Evaluate a model: COCO metrics and accuracy
+# Evaluate a model: COCO metrics and accuracy
+
+<!--
 summary: Score a checkpoint or exported file on a labeled split, and what every metric key means.
 label: Evaluation
 keywords: mayaku, evaluation, coco metrics, mean average precision, pycocotools
----
+-->
 
 `mayaku.evaluate` (command line: `mayaku eval`) scores a trained model on a labeled split. Detectors get COCO metrics computed by pycocotools. Classifiers get top-1 and top-5 accuracy.
 
@@ -22,14 +23,14 @@ mayaku eval runs/mayaku-n-det/train/best.pt \
 
 ## What can be evaluated
 
-The first argument is anything [`from_pretrained`](/mayaku/deployment/prediction/) loads: a checkpoint, a hosted model name, or an **exported file** (`.onnx`, `.mlpackage`, `.xml`, `.engine`). An exported file is scored in its own runtime and precision, so you measure exactly what you deploy. Comparing a checkpoint against its int8 export, for example, shows the real accuracy cost of quantization:
+The first argument is anything [`from_pretrained`](/docs/deployment/prediction.md) loads: a checkpoint, a hosted model name, or an **exported file** (`.onnx`, `.mlpackage`, `.xml`, `.engine`). An exported file is scored in its own runtime and precision, so you measure exactly what you deploy. Comparing a checkpoint against its int8 export, for example, shows the real accuracy cost of quantization:
 
 ```bash
 mayaku eval best.pt     --annotations data/test/_annotations.coco.json --images data/test
 mayaku eval model.onnx  --annotations data/test/_annotations.coco.json --images data/test
 ```
 
-The model is scored with its recorded post-processing, which by default uses a score threshold of 0.001, not the prediction default of 0.4 (see [Prediction](/mayaku/deployment/prediction/#the-score-threshold)). This is the standard way to compute COCO AP.
+The model is scored with its recorded post-processing, which by default uses a score threshold of 0.001, not the prediction default of 0.4 (see [Prediction](/docs/deployment/prediction.md#the-score-threshold)). This is the standard way to compute COCO AP.
 
 ## Arguments
 
@@ -65,15 +66,15 @@ Every detector, oriented-box model, segmentation model and keypoint model report
 
 Object sizes come from the annotation's `area` field when it has one, otherwise from the box. They are measured in the original image's pixels, as pycocotools does.
 
-For [oriented-box models](/mayaku/more-tasks/oriented-boxes/), the same keys are computed with the IoU between **rotated** boxes.
+For [oriented-box models](/docs/more-tasks/oriented-boxes.md), the same keys are computed with the IoU between **rotated** boxes.
 
 ### Segmentation metrics
 
-[Segmentation models](/mayaku/more-tasks/segmentation/) also report the same twelve metrics computed on masks, prefixed `segm_`: `segm_AP`, `segm_AP50`, `segm_AP75`, `segm_AP-S`, `segm_AP-M`, `segm_AP-L`, `segm_AR1`, `segm_AR10`, `segm_AR100`, `segm_AR-S`, `segm_AR-M`, `segm_AR-L`.
+[Segmentation models](/docs/more-tasks/segmentation.md) also report the same twelve metrics computed on masks, prefixed `segm_`: `segm_AP`, `segm_AP50`, `segm_AP75`, `segm_AP-S`, `segm_AP-M`, `segm_AP-L`, `segm_AR1`, `segm_AR10`, `segm_AR100`, `segm_AR-S`, `segm_AR-M`, `segm_AR-L`.
 
 ### Keypoint metrics
 
-[Keypoint models](/mayaku/more-tasks/keypoints/) also report COCO keypoint metrics, which use OKS (object keypoint similarity) in place of IoU, prefixed `kpt_`:
+[Keypoint models](/docs/more-tasks/keypoints.md) also report COCO keypoint metrics, which use OKS (object keypoint similarity) in place of IoU, prefixed `kpt_`:
 
 | Key | Meaning |
 |---|---|
@@ -86,7 +87,7 @@ In a file with several categories, keypoint AP is computed only over the categor
 
 ## Classification metrics
 
-For a [classifier](/mayaku/more-tasks/classification/), pass the class-folder root as `images` with no annotations:
+For a [classifier](/docs/more-tasks/classification.md), pass the class-folder root as `images` with no annotations:
 
 ```bash
 mayaku eval runs/cls/train/best.pt --images data/test
@@ -99,4 +100,4 @@ mayaku eval runs/cls/train/best.pt --images data/test
 
 ## Evaluation during training
 
-When you pass a validation split to `train`, the model is evaluated after every epoch with the same metrics. Results go to `train/log.jsonl`, the best epoch to `train/best.json`, and the final evaluation of `best.pt` to `eval/metrics.json`. See [Training](/mayaku/data-and-training/training/#validation).
+When you pass a validation split to `train`, the model is evaluated after every epoch with the same metrics. Results go to `train/log.jsonl`, the best epoch to `train/best.json`, and the final evaluation of `best.pt` to `eval/metrics.json`. See [Training](/docs/data-and-training/training.md#validation).

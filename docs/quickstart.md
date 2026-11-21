@@ -1,15 +1,16 @@
----
-title: Quickstart: train, predict and export a detector
+# Quickstart: train, predict and export a detector
+
+<!--
 summary: Fine-tune a detector on your own COCO dataset, then predict, evaluate and export it, from the command line or Python.
 label: Quickstart
 keywords: mayaku, quickstart, object detection, fine-tuning, coco
----
+-->
 
 This page fine-tunes an object detector on your own images, then predicts with it, evaluates it and exports it. Every step is shown both as a command and in Python.
 
 You need:
 
-- Mayaku installed (`pip install mayaku`, see [Installation](/mayaku/installation/)).
+- Mayaku installed (`pip install mayaku`, see [Installation](/docs/installation.md)).
 - A dataset in COCO format with a training split and a validation split.
 
 ## 1. Lay out the data
@@ -30,7 +31,7 @@ data/
     └── ...
 ```
 
-Each `file_name` in the JSON is resolved relative to the image directory you pass. Any layout works as long as that holds. The required JSON fields are listed in [Datasets](/mayaku/data-and-training/datasets/).
+Each `file_name` in the JSON is resolved relative to the image directory you pass. Any layout works as long as that holds. The required JSON fields are listed in [Datasets](/docs/data-and-training/datasets.md).
 
 ## 2. Check the data (optional)
 
@@ -41,7 +42,7 @@ report = mayaku.health_check("data/train/_annotations.coco.json", "data/train")
 print(report)
 ```
 
-The report gives image, box and class counts, the input size training would use, object-size fractions, class balance, and warnings such as images without annotations. See [Datasets](/mayaku/data-and-training/datasets/#health-check).
+The report gives image, box and class counts, the input size training would use, object-size fractions, class balance, and warnings such as images without annotations. See [Datasets](/docs/data-and-training/datasets.md#health-check).
 
 ## 3. Train
 
@@ -90,11 +91,11 @@ For a 300-image dataset of 4:3 photos with 3 classes, the log starts like this:
 [mayaku.train] tier n, 3 classes, canvas 672x896, 100 epochs, batch 8 on cuda -> runs/mayaku-n-det/train
 ```
 
-Each `auto-config` line is a setting Mayaku derived from your data because you didn't set it yourself. See [Training](/mayaku/data-and-training/training/#auto-config).
+Each `auto-config` line is a setting Mayaku derived from your data because you didn't set it yourself. See [Training](/docs/data-and-training/training.md#auto-config).
 
 When training finishes, the command prints `final weights: runs/mayaku-n-det/train/best.pt`.
 
-For the medium size, use `mayaku-m-det`. See [Models](/mayaku/data-and-training/models/). For every training option, see [Training](/mayaku/data-and-training/training/).
+For the medium size, use `mayaku-m-det`. See [Models](/docs/data-and-training/models.md). For every training option, see [Training](/docs/data-and-training/training.md).
 
 ## 4. Predict
 
@@ -116,7 +117,7 @@ for box, score, label in zip(det.boxes.tolist(), det.scores.tolist(), det.labels
     print(predictor.class_names[label], round(score, 3), box)   # box is [x1, y1, x2, y2] in pixels
 ```
 
-The checkpoint holds the class names, input size and thresholds, so no config file is needed. See [Prediction](/mayaku/deployment/prediction/).
+The checkpoint holds the class names, input size and thresholds, so no config file is needed. See [Prediction](/docs/deployment/prediction.md).
 
 ## 5. Evaluate on the test split
 
@@ -133,7 +134,7 @@ metrics = evaluate("runs/mayaku-n-det/train/best.pt",
 print(metrics["AP"], metrics["AP50"])
 ```
 
-See [Evaluation](/mayaku/deployment/evaluation/) for every metric key.
+See [Evaluation](/docs/deployment/evaluation.md) for every metric key.
 
 ## 6. Export
 
@@ -147,4 +148,4 @@ The exported file runs through the same `from_pretrained` and `mayaku predict`:
 mayaku predict model.onnx photo.jpg
 ```
 
-Core ML, OpenVINO and TensorRT work the same way. See [Export and deployment](/mayaku/deployment/export/).
+Core ML, OpenVINO and TensorRT work the same way. See [Export and deployment](/docs/deployment/export.md).

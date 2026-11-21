@@ -1,9 +1,10 @@
----
-title: Install Mayaku
+# Install Mayaku
+
+<!--
 summary: Install Mayaku with pip, add the optional export packages, and choose the device it runs on.
 label: Installation
 keywords: mayaku, install, pip, pytorch, cuda, apple silicon
----
+-->
 
 ## Requirements
 
@@ -70,7 +71,7 @@ Every command and function that runs a model takes a `device` argument (`--devic
 | `mps` | Apple Silicon GPU. |
 | `cpu` | CPU only. |
 
-Training on more than one GPU is covered in [Training](/mayaku/data-and-training/training/#multiple-gpus). It needs CUDA. MPS supports a single device only.
+Training on more than one GPU is covered in [Training](/docs/data-and-training/training.md#multiple-gpus). It needs CUDA. MPS supports a single device only.
 
 On Apple Silicon, Mayaku sets the environment variable `PYTORCH_ENABLE_MPS_FALLBACK=1` when it is imported. Any PyTorch operation without an MPS kernel then runs on the CPU instead of raising an error. If you set the variable yourself before importing Mayaku, including to `0`, your value is kept.
 

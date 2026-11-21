@@ -1,9 +1,10 @@
----
-title: Pretrained models, sizes and downloads
+# Pretrained models, sizes and downloads
+
+<!--
 summary: The hosted model names, the model sizes with their parameters and compute, and how weights download.
 label: Models
 keywords: mayaku, pretrained models, model zoo, model sizes, download
----
+-->
 
 ## Hosted pretrained models
 
@@ -22,7 +23,7 @@ All are pretrained on Objects365. The pattern is `mayaku-<size>-<task>`. To see 
 mayaku download --list
 ```
 
-No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/mayaku/more-tasks/keypoints/), [oriented boxes](/mayaku/more-tasks/oriented-boxes/#train), [classification](/mayaku/more-tasks/classification/#train).
+No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md#train), [classification](/docs/more-tasks/classification.md#train).
 
 ## Sizes
 
@@ -48,7 +49,7 @@ The architecture:
 - A convolutional backbone, a three-level feature pyramid at strides 8, 16 and 32, and an anchor-free detection head that predicts each box side as a distribution (DFL).
 - Masks, keypoints and oriented boxes are extra branches on the same detector.
 - Overlapping detections are removed by NMS in post-processing, not inside the network.
-- The deployed network uses only 1×1 and 3×3 convolutions, ReLU, addition, nearest upsampling and max-pooling (see [Export](/mayaku/deployment/export/#the-exported-graph)).
+- The deployed network uses only 1×1 and 3×3 convolutions, ReLU, addition, nearest upsampling and max-pooling (see [Export](/docs/deployment/export.md#the-exported-graph)).
 
 ## Downloads
 

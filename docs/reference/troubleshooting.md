@@ -1,9 +1,10 @@
----
-title: Troubleshooting: errors and fixes
+# Troubleshooting: errors and fixes
+
+<!--
 summary: Mayaku error messages grouped by when they happen, with the cause and the fix for each.
 label: Troubleshooting
 keywords: mayaku, troubleshooting, errors, faq, debugging
----
+-->
 
 Errors are listed by the text Mayaku prints, grouped by when they happen. Search this page for a fragment of your error message.
 
@@ -56,7 +57,7 @@ The downloaded file's size or SHA256 doesn't match the manifest. The partial fil
 The warm-start weights don't fit the model the config describes. Common causes:
 
 - **Different size.** `--set model.tier=s` with `mayaku-n-det`. Use the weights of the size you set, or drop the `tier` setting.
-- **Different keypoint count.** Starting from a `-key` model with another `model.keypoints.num`, which shows keys such as `aux.heat.weight`. Start from `mayaku-<size>-det` instead. See [Keypoints](/mayaku/more-tasks/keypoints/#starting-from-a-pretrained-keypoint-model).
+- **Different keypoint count.** Starting from a `-key` model with another `model.keypoints.num`, which shows keys such as `aux.heat.weight`. Start from `mayaku-<size>-det` instead. See [Keypoints](/docs/more-tasks/keypoints.md#train).
 
 ### `backbone does not fit this tier: [...]`
 
@@ -64,7 +65,7 @@ When starting a classifier from a checkpoint, the checkpoint is a different size
 
 ### `model.num_classes is N and the training annotations have M categories`
 
-You set `model.num_classes` and it disagrees with the training JSON. Remove the setting, since it is filled in automatically, or fix the data. Every entry in `categories` counts, including unused ones. See [Datasets](/mayaku/data-and-training/datasets/#classes).
+You set `model.num_classes` and it disagrees with the training JSON. Remove the setting, since it is filled in automatically, or fix the data. Every entry in `categories` counts, including unused ones. See [Datasets](/docs/data-and-training/datasets.md#classes).
 
 ### `train_annotations (a COCO JSON) is required with train_images`
 
@@ -106,7 +107,7 @@ The training split given to `--resume` has different classes from the original r
 
 ### `Extra inputs are not permitted` / `Unexpected keyword argument`
 
-A config field name is misspelled or doesn't exist. The error names the path, for example `train.lerning_rate`. Field names are listed in [Configuration](/mayaku/reference/configuration/).
+A config field name is misspelled or doesn't exist. The error names the path, for example `train.lerning_rate`. Field names are listed in [Configuration](/docs/reference/configuration.md).
 
 ### `canvas (650, 650): both sides must be multiples of 32`
 
@@ -154,13 +155,13 @@ A validation or test image listed in the JSON can't be read. Check that the file
 
 ### AP is `-1.0` for `AP-S`, `AP-M` or `AP-L`
 
-The split has no ground-truth objects of that size. `-1.0` means not applicable. See [Evaluation](/mayaku/deployment/evaluation/#detection-metrics).
+The split has no ground-truth objects of that size. `-1.0` means not applicable. See [Evaluation](/docs/deployment/evaluation.md#detection-metrics).
 
 ## Prediction
 
 ### Hundreds of low-score detections
 
-The default score threshold is `0.001`, the value used for COCO AP. Pass a threshold: `predictor(image, conf=0.25)` or `mayaku predict ... --conf 0.25`. See [Prediction](/mayaku/deployment/prediction/#the-score-threshold).
+The default score threshold is `0.001`, the value used for COCO AP. Pass a threshold: `predictor(image, conf=0.25)` or `mayaku predict ... --conf 0.25`. See [Prediction](/docs/deployment/prediction.md#the-score-threshold).
 
 ### Wrong colors or noticeably worse results on camera frames
 

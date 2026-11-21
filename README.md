@@ -12,7 +12,7 @@ Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on CU
 Silicon or CPU, and every model exports to a graph of just five operations that runs on
 any runtime, including true int8 on NPUs.
 
-![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
+![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/docs/assets/rf100_ap_vs_latency.png)
 
 - **Highest fine-tune AP at nano size.** Across all 100 datasets of
   [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.9 AP**: ahead of RF-DETR nano
@@ -82,7 +82,7 @@ checkpoint is scored by the same pycocotools evaluator on each dataset's validat
 
 The gain is largest on small objects, where nano detectors usually struggle:
 
-![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_by_size.png)
+![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/docs/assets/rf100_ap_by_size.png)
 
 > **Protocol.** AP is COCO AP@[.50:.95] (pycocotools, `maxDets=100`) on each dataset's
 > validation split, at the best epoch on that split, averaged over all 100 datasets.

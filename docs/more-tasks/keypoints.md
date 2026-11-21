@@ -1,11 +1,12 @@
----
-title: Train a keypoint detection model
+# Train a keypoint detection model
+
+<!--
 summary: Train a model that locates K keypoints per object, with correct left/right flips, and read its keypoints.
 label: Keypoints
 keywords: mayaku, keypoint detection, pose estimation, coco keypoints, oks
----
+-->
 
-A keypoint model detects each object, giving a box, class and score, and also locates a fixed set of `K` points on it: the joints of a person, the corners of a part, the landmarks of an animal. In Mayaku it is a detector with a keypoint branch turned on (`model.keypoints`). Everything in [Training](/mayaku/data-and-training/training/) applies.
+A keypoint model detects each object, giving a box, class and score, and also locates a fixed set of `K` points on it: the joints of a person, the corners of a part, the landmarks of an animal. In Mayaku it is a detector with a keypoint branch turned on (`model.keypoints`). Everything in [Training](/docs/data-and-training/training.md) applies.
 
 ## Data
 
@@ -56,7 +57,7 @@ result = train(
 )
 ```
 
-The box part starts pretrained and the keypoint branch starts fresh. Keypoint names and left/right pairs are filled in from your categories ([auto-config](/mayaku/data-and-training/training/#auto-config)) and saved in the checkpoint.
+The box part starts pretrained and the keypoint branch starts fresh. Keypoint names and left/right pairs are filled in from your categories ([auto-config](/docs/data-and-training/training.md#auto-config)) and saved in the checkpoint.
 
 No pretrained keypoint model is hosted: keypoint detection is experimental. Start from the detector weights (`mayaku-n-det`), as shown above. A checkpoint you trained yourself continues only with the same keypoint count; a different `model.keypoints.num` fails with `state dict does not fit this model: ['aux.heat.weight', ...]`.
 
@@ -93,4 +94,4 @@ for obj in det.keypoints:
 
 ## Export
 
-Keypoint models export to every target like a detector. See [Export and deployment](/mayaku/deployment/export/).
+Keypoint models export to every target like a detector. See [Export and deployment](/docs/deployment/export.md).

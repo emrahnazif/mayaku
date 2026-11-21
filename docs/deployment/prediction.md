@@ -1,9 +1,10 @@
----
-title: Run predictions with a trained model
+# Run predictions with a trained model
+
+<!--
 summary: Load a checkpoint or exported file with from_pretrained, set the score threshold, and read Detections.
 label: Prediction
 keywords: mayaku, inference, prediction, from_pretrained, detections
----
+-->
 
 `mayaku.from_pretrained` loads any trained Mayaku model, whether a checkpoint, a hosted model name or an exported file, and returns a predictor. Call the predictor with an image to get the results in that image's pixel coordinates.
 
@@ -65,7 +66,7 @@ det = predictor("photo.jpg", conf=0.5)
 
 `mayaku predict` takes the same value as `--conf 0.5`.
 
-**The threshold is chosen when the model is trained.** At the end of training, the final weights are scored on the validation split, and the same pass measures precision and recall at every threshold from 0.1 to 0.7 in steps of 0.05. The checkpoint records the threshold with the best F1, the balance of precision and recall. Training logs the choice, for example `prediction threshold 0.25 (precision 0.806, recall 0.684, F1 0.740 on the validation split)`, and keeps it in the checkpoint as `predictor.sidecar["predict"]["conf"]`, with how it was chosen in `predictor.sidecar["predict_tuned"]`. Models whose scores are spread over many classes get a lower threshold (the Objects365 nano gets 0.2); confident fine-tuned models usually get 0.4 to 0.7. On the 100 RF100-VL datasets, the threshold picked on each validation split gave up 0.006 F1 on its test split against the best possible threshold, a fixed 0.4 gave up 0.008, and validation splits of only 100 to 500 objects still picked better than 0.4. Without a validation split, or with fewer than 50 validation objects, the threshold stays at **0.4**. If you prefer fewer false detections to more found objects, set a higher threshold yourself. A threshold you set in the config (`train.predict.conf`) is kept. `mayaku tune-predict` runs the same choice on an existing checkpoint (see [Command line](/mayaku/reference/cli/#mayaku-tune-predict)).
+**The threshold is chosen when the model is trained.** At the end of training, the final weights are scored on the validation split, and the same pass measures precision and recall at every threshold from 0.1 to 0.7 in steps of 0.05. The checkpoint records the threshold with the best F1, the balance of precision and recall. Training logs the choice, for example `prediction threshold 0.25 (precision 0.806, recall 0.684, F1 0.740 on the validation split)`, and keeps it in the checkpoint as `predictor.sidecar["predict"]["conf"]`, with how it was chosen in `predictor.sidecar["predict_tuned"]`. Models whose scores are spread over many classes get a lower threshold (the Objects365 nano gets 0.2); confident fine-tuned models usually get 0.4 to 0.7. On the 100 RF100-VL datasets, the threshold picked on each validation split gave up 0.006 F1 on its test split against the best possible threshold, a fixed 0.4 gave up 0.008, and validation splits of only 100 to 500 objects still picked better than 0.4. Without a validation split, or with fewer than 50 validation objects, the threshold stays at **0.4**. If you prefer fewer false detections to more found objects, set a higher threshold yourself. A threshold you set in the config (`train.predict.conf`) is kept. `mayaku tune-predict` runs the same choice on an existing checkpoint (see [Command line](/docs/reference/cli.md#mayaku-tune-predict)).
 
 The chosen value reflects the validation split. Missing labels in it count as false detections and lower the threshold; a split unlike your footage may suit a different one.
 
@@ -89,7 +90,7 @@ det = predictor("photo.jpg", decode="eval")
 | `topk` | `1000` | `1000` | Candidates kept before NMS. |
 | `multi_label` | `false` | `true` | An object may be reported once per class that scores above `conf`, so the same box can appear with two different classes. With `false`, each location gives at most its best class. |
 
-Set a model's own prediction values when you train it (see [Configuration](/mayaku/reference/configuration/#decode-settings)). They are in `predictor.sidecar["predict"]`, and the evaluation's in `predictor.sidecar["decode"]`. Checkpoints saved before prediction values existed use the prediction defaults above.
+Set a model's own prediction values when you train it (see [Configuration](/docs/reference/configuration.md#decode-settings)). They are in `predictor.sidecar["predict"]`, and the evaluation's in `predictor.sidecar["decode"]`. Checkpoints saved before prediction values existed use the prediction defaults above.
 
 AP computed from predictions is lower than the model's real AP, because predictions leave out the low-scoring detections that AP counts: the street nano measures 43.5 AP with `decode="eval"` and 34.6 from its predictions at 0.4. Use `mayaku eval`, or `decode="eval"` when you compute metrics yourself.
 
@@ -110,7 +111,7 @@ Detection, segmentation, keypoint and oriented-box models return a `Detections` 
 
 `len(det)` is the number of detections. Row `i` of every field describes the same object.
 
-Details on each optional field are on the task pages: [masks](/mayaku/more-tasks/segmentation/#predict), [keypoints](/mayaku/more-tasks/keypoints/#predict), [oriented boxes](/mayaku/more-tasks/oriented-boxes/#predict).
+Details on each optional field are on the task pages: [masks](/docs/more-tasks/segmentation.md#predict), [keypoints](/docs/more-tasks/keypoints.md#predict), [oriented boxes](/docs/more-tasks/oriented-boxes.md#predict).
 
 ## Classification
 
@@ -122,7 +123,7 @@ A classifier returns a `Classification` for each image:
 | `label` | Index of the most likely class |
 | `top(k=5)` | List of `(class_index, probability)` pairs, best first |
 
-`conf` has no effect on a classifier. See [Image classification](/mayaku/more-tasks/classification/#predict).
+`conf` has no effect on a classifier. See [Image classification](/docs/more-tasks/classification.md#predict).
 
 ## Predictor attributes
 

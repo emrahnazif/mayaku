@@ -1,16 +1,17 @@
----
-title: Mayaku
-summary: The most accurate nano detector to fine-tune on your own data. Train detection and instance segmentation models on your images and deploy them to ONNX, Core ML, OpenVINO and TensorRT, including true int8.
+# Mayaku
+
+<!--
+summary: Fine-tune real-time detection and segmentation models on your own data, and deploy them to ONNX, Core ML, OpenVINO and TensorRT, int8 included.
 label: Mayaku
 keywords: mayaku, object detection, instance segmentation, fine-tuning, int8, computer vision, pytorch
 template: docs
----
+-->
 
 **The most accurate nano detector to fine-tune on your own data.** Mayaku is a real-time detector family built for the job most people actually have: take a pretrained model, train it on a few hundred images of your own objects, and ship it to whatever hardware you have.
 
 Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on NVIDIA GPUs (CUDA), Apple Silicon (MPS) or the CPU, and every model exports to a graph of just five operations that runs on any runtime, including true int8 on NPUs.
 
-![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
+![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](/docs/assets/rf100_ap_vs_latency.png)
 
 *End to end* is a decoded image in memory to final boxes in its pixels, batch 1, with each library's own pre- and post-processing; each model at its default input size.
 
@@ -64,9 +65,9 @@ RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, spo
 | RF-DETR nano | 30.5M | 57.4 | 29.6 | 49.5 | 65.6 |
 | YOLO26n | 2.4M | 54.8 | 28.3 | 47.7 | 60.8 |
 
-![Mean RF100-VL AP against parameter count: mayaku-n 58.9 AP at 5.18M, YOLO26s 57.8 at 9.5M, RF-DETR nano 57.4 at 30.5M, YOLO26n 54.8 at 2.4M](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_params.png)
+![Mean RF100-VL AP against parameter count: mayaku-n 58.9 AP at 5.18M, YOLO26s 57.8 at 9.5M, RF-DETR nano 57.4 at 30.5M, YOLO26n 54.8 at 2.4M](/docs/assets/rf100_ap_vs_params.png)
 
-![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_by_size.png)
+![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](/docs/assets/rf100_ap_by_size.png)
 
 > **Protocol.** AP is COCO AP@[.50:.95] (pycocotools, `maxDets=100`) on each dataset's validation split, at the best epoch on that split, averaged over all 100 datasets. Parameters are deploy (fused) counts as published by each library. Every library trains at its own defaults.
 
@@ -85,32 +86,32 @@ All are pretrained on Objects365 and fine-tune from COCO JSON. Pass a name and M
 
 First steps:
 
-- [Installation](/mayaku/installation/): `pip install`, self-installing export runtimes, supported platforms.
-- [Quickstart](/mayaku/quickstart/): train, predict, evaluate and export a detector in five commands.
+- [Installation](/docs/installation.md): `pip install`, self-installing export runtimes, supported platforms.
+- [Quickstart](/docs/quickstart.md): train, predict, evaluate and export a detector in five commands.
 
 Data and training:
 
-- [Datasets](/mayaku/data-and-training/datasets/): the COCO JSON layout detection and segmentation need.
-- [Models](/mayaku/data-and-training/models/): the hosted model names, the sizes, and how weights are downloaded.
-- [Training](/mayaku/data-and-training/training/): `mayaku.train`, the run directory, auto-config, resuming, multiple GPUs.
+- [Datasets](/docs/data-and-training/datasets.md): the COCO JSON layout detection and segmentation need.
+- [Models](/docs/data-and-training/models.md): the hosted model names, the sizes, and how weights are downloaded.
+- [Training](/docs/data-and-training/training.md): `mayaku.train`, the run directory, auto-config, resuming, multiple GPUs.
 
 Deployment:
 
-- [Evaluation](/mayaku/deployment/evaluation/): COCO metrics, and what each metric key means.
-- [Export](/mayaku/deployment/export/): ONNX, Core ML, OpenVINO, TensorRT, precisions and int8.
-- [Prediction](/mayaku/deployment/prediction/): `from_pretrained`, the `Detections` object, batches, the JSON output of `mayaku predict`.
+- [Evaluation](/docs/deployment/evaluation.md): COCO metrics, and what each metric key means.
+- [Export](/docs/deployment/export.md): ONNX, Core ML, OpenVINO, TensorRT, precisions and int8.
+- [Prediction](/docs/deployment/prediction.md): `from_pretrained`, the `Detections` object, batches, the JSON output of `mayaku predict`.
 
 More tasks:
 
-- [Instance segmentation](/mayaku/more-tasks/segmentation/)
-- Experimental, in the library but not yet benchmarked: [image classification](/mayaku/more-tasks/classification/), [keypoint detection](/mayaku/more-tasks/keypoints/), [oriented boxes](/mayaku/more-tasks/oriented-boxes/).
+- [Instance segmentation](/docs/more-tasks/segmentation.md)
+- Experimental, in the library but not yet benchmarked: [image classification](/docs/more-tasks/classification.md), [keypoint detection](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md).
 
 Reference:
 
-- [Command line](/mayaku/reference/cli/): every `mayaku` command and option.
-- [Configuration](/mayaku/reference/configuration/): every config field, its default, and how to set it.
-- [Python API](/mayaku/reference/python-api/): every public function and class.
-- [Troubleshooting](/mayaku/reference/troubleshooting/): error messages and what to do about them.
+- [Command line](/docs/reference/cli.md): every `mayaku` command and option.
+- [Configuration](/docs/reference/configuration.md): every config field, its default, and how to set it.
+- [Python API](/docs/reference/python-api.md): every public function and class.
+- [Troubleshooting](/docs/reference/troubleshooting.md): error messages and what to do about them.
 
 ## Key facts
 

@@ -1,9 +1,10 @@
----
-title: Export to ONNX, Core ML, OpenVINO and TensorRT
+# Export to ONNX, Core ML, OpenVINO and TensorRT
+
+<!--
 summary: Export a trained model for deployment, choose a precision, use int8, and run it with or without Mayaku.
 label: Export
 keywords: mayaku, export, onnx, coreml, openvino, tensorrt
----
+-->
 
 `mayaku export` turns a trained checkpoint into a file for a deployment runtime: ONNX, Core ML, OpenVINO or TensorRT. Every task exports: detection, segmentation, keypoints, oriented boxes and classification.
 
@@ -37,7 +38,7 @@ det = predictor("photo.jpg")
 | `openvino` | `.xml` + `.bin` | `fp32`, `fp16`, `int8` | Intel CPUs, integrated GPUs, NPUs |
 | `tensorrt` | `.engine` | `fp16`, `int8`, `fp32` | NVIDIA GPUs |
 
-Each target's runtime is installed the first time it is needed (see [Installation](/mayaku/installation/)).
+Each target's runtime is installed the first time it is needed (see [Installation](/docs/installation.md)).
 
 Choose a precision with `--precision`:
 
@@ -73,7 +74,7 @@ path = predictor.export("coreml", "model_int8.mlpackage", precision="int8")
 The exported model contains only five operations: 1×1 and 3×3 convolutions, ReLU, addition, nearest-neighbor upsampling, and 3×3 max-pooling. There are no custom operators, attention or deformable convolutions, so any runtime that supports these ops can run it. Export asserts this on every ONNX file it writes.
 
 - **Fixed input size.** The input is one image (batch 1) at the model's canvas, `(1, 3, H, W)`. Find the canvas in `predictor.canvas` or in `canvas_hw` in the embedded metadata. `predictor.batch([...])` on an exported model runs the images one at a time.
-- **Input.** ONNX, OpenVINO and TensorRT take a float32 tensor named `images`, planar RGB, values scaled to 0–1, already letterboxed (see [Prediction](/mayaku/deployment/prediction/#preprocessing)). Core ML takes an 8-bit image and does the 1/255 scaling inside the model. These describe the graph itself; Mayaku's own predictors take BGR images and convert them for you.
+- **Input.** ONNX, OpenVINO and TensorRT take a float32 tensor named `images`, planar RGB, values scaled to 0–1, already letterboxed (see [Prediction](/docs/deployment/prediction.md#preprocessing)). Core ML takes an 8-bit image and does the 1/255 scaling inside the model. These describe the graph itself; Mayaku's own predictors take BGR images and convert them for you.
 - **Outputs are raw feature maps,** not boxes: per-level class logits (`cls0`, `cls1`, `cls2`) and box distributions (`box0`, `box1`, `box2`), plus the mask, keypoint or angle maps for those tasks. The sigmoid, box decoding, score threshold, NMS, mask assembly and keypoint refinement run on the host. Mayaku's predictors do this for you.
 
 ### Running without Mayaku
@@ -100,7 +101,7 @@ A TensorRT `.engine` written by Mayaku is not a plain engine file. Strip the hea
 
 ## int8
 
-Models are trained quantization-aware by default (`model.qat: true`, see [Training](/mayaku/data-and-training/training/#the-training-recipe)). Such a model has learned the value ranges of every layer, and int8 export writes exactly the network it was trained as. No calibration dataset is needed.
+Models are trained quantization-aware by default (`model.qat: true`, see [Training](/docs/data-and-training/training.md#the-training-recipe)). Such a model has learned the value ranges of every layer, and int8 export writes exactly the network it was trained as. No calibration dataset is needed.
 
 ```bash
 mayaku export onnx     best.pt --precision int8 --output model_int8.onnx
