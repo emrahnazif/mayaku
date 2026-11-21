@@ -74,7 +74,15 @@ Homepage = "https://github.com/datamarkin/mayaku"
 path = "src/mayaku/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mayaku"]
+# docs/ stays at the repository root (the website copies it from there) and
+# ships as mayaku/docs/, pages only, so coding agents read the docs of the
+# installed version offline.
+only-include = ["src/mayaku", "docs"]
+exclude = ["docs/assets"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"docs" = "mayaku/docs"
 
 [tool.ruff]
 line-length = 100

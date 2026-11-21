@@ -142,7 +142,17 @@ frames from `cv2.VideoCapture` go in as they are, with no conversion.
 | `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | released |
 
 All are pretrained on Objects365; detection and segmentation read COCO JSON.
-`mayaku download --list` shows what is hosted. 
+`mayaku download --list` shows what is hosted.
+
+## Documentation
+
+The documentation is at [emrah.fr/mayaku](https://emrah.fr/mayaku/). The same pages come with the
+package, matching the installed version, so a coding agent can read them offline. `llms.txt` in
+that folder lists every page. This command prints the folder:
+
+```bash
+python -c "import mayaku, os; print(os.path.dirname(mayaku.__file__) + '/docs')"
+```
 
 ## License
 
