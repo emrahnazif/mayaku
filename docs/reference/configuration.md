@@ -131,6 +131,7 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | `train.warmup_epochs` | `3.0` | Warmup length in epochs: the learning-rate ramp, and the ramp of micro-batches per step (see `lr_ref_batch`). |
 | `train.warmup_momentum_start` | `0.8` | Momentum at the start of warmup. |
 | `train.warmup_bias_lr_start` | `0.1` | Bias learning rate at the start of warmup. It ramps down to `lr`. SGD and MuSGD only: under `adamw` biases warm up from `0` like every other weight. |
+| `train.rescale_pretrained` | `1.5` | Warm starts only: pretrained convolutions that feed a BatchNorm are scaled up to at least this multiple of their initial weight norm. The output is unchanged, so early fine-tuning doesn't erase the pretrained features. `0` turns it off. |
 | `train.seed` | `0` | Random seed. |
 | `train.amp` | `true` | Mixed-precision training. Applies on CUDA only. |
 | `train.sync_bn` | `true` | Multi-GPU only: BatchNorm statistics over the whole batch rather than each GPU's share. |
@@ -156,6 +157,8 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | `train.loc_weight_floor` | `0.0` | Minimum weight of the box and DFL loss per positive. `0` is off. |
 | `train.seg_gain` | `2.0` | Weight of the mask (Dice) loss. |
 | `train.seg_cap` | `250` | Maximum positives per batch for the mask loss. |
+| `train.kpt_gain` | `1.0` | Weight of the keypoint losses. |
+| `train.obb_angle_gain` | `1.0` | Weight of the oriented-box angle loss, `sin²(2 × angle error)`. |
 
 ### train.aug
 

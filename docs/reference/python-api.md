@@ -6,7 +6,7 @@ label: Python API
 keywords: mayaku, python api, train, from_pretrained, detections
 -->
 
-The public API is the four functions in the top-level `mayaku` package, plus the classes and helpers listed below. Anything else under `mayaku.*` is internal and may change.
+The public API is the five functions in the top-level `mayaku` package, plus the classes and helpers listed below. Anything else under `mayaku.*` is internal and may change.
 
 ```python
 import mayaku
@@ -15,6 +15,7 @@ mayaku.train            # train a model
 mayaku.evaluate         # score a model
 mayaku.from_pretrained  # load a model for prediction
 mayaku.health_check     # inspect a COCO split
+mayaku.tune_predict     # choose a checkpoint's prediction threshold
 mayaku.__version__      # e.g. "3.0.0"
 ```
 
@@ -54,10 +55,10 @@ Returns a dict with `final_weights` (`Path`), `output_dir` (`Path`), `metrics` (
 
 ```python
 mayaku.evaluate(weights, *, annotations=None, images, output_dir=None,
-                device="auto", log=print) -> dict
+                device="auto", log=print, operating=False) -> dict
 ```
 
-Scores a checkpoint, hosted model or exported file. Returns a flat dict of metrics: COCO metrics for detectors (`AP`, `AP50`, ..., plus `segm_*` / `kpt_*`), or `top1` and `top5` for classifiers, whose `annotations` must be `None`. With `output_dir`, it also writes `metrics.json` there. See [Evaluation](/docs/deployment/evaluation.md).
+Scores a checkpoint, hosted model or exported file. Returns a flat dict of metrics: COCO metrics for detectors (`AP`, `AP50`, ..., plus `segm_*` / `kpt_*`), or `top1` and `top5` for classifiers, whose `annotations` must be `None`. With `output_dir`, it also writes `metrics.json` there. With `operating=True`, the dict adds `predict_conf`, the best-F1 prediction threshold on this split, with `predict_precision`, `predict_recall` and `predict_f1`. See [Evaluation](/docs/deployment/evaluation.md).
 
 ## mayaku.from_pretrained
 
@@ -78,8 +79,8 @@ Both have the same interface. See [Prediction](/docs/deployment/prediction.md).
 
 | Member | Meaning |
 |---|---|
-| `__call__(image, conf=None)` | One image (path, PIL image, or `(H, W, 3)` BGR `uint8` array, OpenCV's order) → `Detections`, or `Classification` for a classifier. `conf` overrides the recorded score threshold. |
-| `batch(images, conf=None)` | A list of images → a list of results. |
+| `__call__(image, conf=None, decode="predict")` | One image (path, PIL image, or `(H, W, 3)` BGR `uint8` array, OpenCV's order) → `Detections`, or `Classification` for a classifier. `conf` overrides the recorded score threshold. `decode="eval"` gives the evaluation's post-processing instead (see [Prediction and evaluation post-processing](/docs/deployment/prediction.md#prediction-and-evaluation-post-processing)). |
+| `batch(images, conf=None, decode="predict")` | A list of images → a list of results. |
 | `class_names` | `list[str]` |
 | `canvas` | `(height, width)` input size |
 | `sidecar` | `dict`: the model's embedded description (config, classes, canvas, outputs, decode values, preprocessing, task settings, quantization, export info). |
@@ -127,6 +128,14 @@ mayaku.health_check(annotations, images, cfg=None) -> dict
 ```
 
 Scans one COCO split: counts, the canvas training would use (from `cfg`, default `MayakuConfig()`), object-size fractions, box aspect percentiles, class balance and warnings. See [Datasets](/docs/data-and-training/datasets.md#health-check).
+
+## mayaku.tune_predict
+
+```python
+mayaku.tune_predict(weights, *, annotations, images, output=None, device="auto", log=print) -> dict
+```
+
+Chooses a checkpoint's prediction score threshold on a labeled split, as training does at its end, and saves it in the checkpoint, or in a copy at `output`. Returns the metrics, with `predict_conf` when the split has enough objects to choose from. Command line: [`mayaku tune-predict`](/docs/reference/cli.md#mayaku-tune-predict). When to use it: [The score threshold](/docs/deployment/prediction.md#the-score-threshold).
 
 ## mayaku.config
 
