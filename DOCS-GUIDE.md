@@ -148,10 +148,14 @@ turn into a parameter list, and a reference page does not tell a story.
 
 ### The first page (`index.md`)
 
-What the library does, how to install it, and a first working result in a few minutes. There is
-no separate "Introduction" or "Quick start" page; this page is both. The example below is for a
-Python package; for an app, Install is how to download and start it, and Quick start is the first
-thing to do in it, with a screenshot.
+What the library does, how to install it, and a first working result in a few minutes. The example
+below is for a Python package; for an app, Install is how to download and start it, and Quick start
+is the first thing to do in it, with a screenshot.
+
+When installing or the first result needs more than a few lines (optional extras, devices, a
+dataset to prepare, several steps), give each its own page next to `index.md` (for example
+`installation.md` and `quick-start.md`) and keep a short version of both on the first page, linking
+to the full page. There is no separate "Introduction" page: `index.md` is the introduction.
 
 ````markdown
 # <Library>
@@ -306,7 +310,8 @@ no includes, no MDX).
   imports included. Use realistic names and data, not `foo`/`bar`.
 - Say why, not only what: when there are two ways, say when to use which.
 - For anything that draws on an image, show the result image. The input image is not needed.
-- One idea per page. More than ~5 `##` sections usually means two pages.
+- One idea per page. Split a page when it covers two topics, not because it is long: a page about
+  one subject (training, a reference module) can have as many `##` sections as the subject needs.
 - No marketing words ("powerful", "seamless", "blazing fast", "battle-tested"); show a number or
   an example instead. Only numbers you have measured, with what they were measured on.
 - Only real uses, no invented scenarios or customers.
