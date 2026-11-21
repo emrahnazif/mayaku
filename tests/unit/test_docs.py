@@ -28,6 +28,12 @@ def prose(page: Path) -> str:
     return FENCE.sub("", page.read_text())
 
 
+def header(page: Path) -> dict[str, str]:
+    m = re.match(r"# .+\n\n<!--\n(.*?)\n-->\n", page.read_text(), re.S)
+    assert m, f"{page} must start with '# Title' and an HTML comment header"
+    return dict(line.split(": ", 1) for line in m.group(1).splitlines())
+
+
 def anchors(page: Path) -> set[str]:
     out: set[str] = set()
     seen: dict[str, int] = {}
@@ -41,10 +47,7 @@ def anchors(page: Path) -> set[str]:
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: str(p.relative_to(DOCS)))
 def test_page_header(page: Path) -> None:
-    text = page.read_text()
-    m = re.match(r"# (.+)\n\n<!--\n(.*?)\n-->\n", text, re.S)
-    assert m, "page must start with '# Title' and an HTML comment header"
-    fields = dict(line.split(": ", 1) for line in m.group(2).splitlines())
+    fields = header(page)
     is_index = page == DOCS / "index.md"
     assert set(fields) == {"summary", "label", "keywords"} | ({"template"} if is_index else set())
     assert len(fields["summary"]) < 160
@@ -99,3 +102,11 @@ def test_cli_lists_every_command() -> None:
     page = (DOCS / "reference" / "cli.md").read_text()
     for command in app.registered_commands:
         assert f"## mayaku {command.name}\n" in page
+
+
+def test_llms_txt_lists_every_page() -> None:
+    listed = dict(re.findall(r"^- \[.+?\]\((/docs/[^)]+)\): (.+)$",
+                             (DOCS / "llms.txt").read_text(), re.M))
+    for page in PAGES:
+        assert listed.get(f"/{page.relative_to(ROOT).as_posix()}") == header(page)["summary"], page
+    assert len(listed) == len(PAGES)
