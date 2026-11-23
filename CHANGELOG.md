@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.1.1: Street models
 
 - int8 ONNX and OpenVINO exports lose less accuracy. Most activations are ReLU outputs, which are
   never negative, and the symmetric int8 grid gave them only its 128 non-negative levels. These
@@ -12,6 +12,23 @@
   it is measured on the Neural Engine.
 - `mayaku.model.export_onnx` takes `regrid=True` for that int8 grid; its default output is
   unchanged.
+- Hosted street models: `mayaku-n-det-street`, `mayaku-n-seg-street`, `mayaku-m-det-street` and
+  `mayaku-m-seg-street` detect 22 road and street classes, e-scooters, license plates, faces and
+  emergency vehicles included, from street level to drone and aerial views. On the street
+  validation set (17,712 images) nano scores 43.9 box AP and 35.2 mask AP, medium 56.8 and 45.5.
+  They download by name in every 3.x version; the docs now list them.
+- Export runtimes install in environments made by `uv venv`, which have no pip: the install falls
+  back to `uv pip`. Before, every ONNX and OpenVINO export failed there with `No module named pip`.
+- ONNX models run on the GPU. onnxruntime-gpu needs CUDA libraries that torch's CUDA 13 wheels
+  no longer install (cuRAND), and it does not find the pip-installed ones by itself, so every
+  ONNX session silently ran on the CPU. Mayaku now installs `onnxruntime-gpu[cuda,cudnn]` and
+  loads those libraries before a CUDA session; an existing install without them is completed the
+  first time it falls back, with a warning if CUDA still does not load. Street nano seg, one
+  1080p frame end to end on an RTX 3090: 18 ms instead of 87 ms; street medium 22 ms instead
+  of 232 ms.
+- An export path without the target's extension gets it added: `export("openvino", "street")`
+  writes `street.xml`. Before, OpenVINO failed with an internal error and ONNX wrote a file with no
+  extension that could not be loaded back. A path with another target's extension is refused.
 
 ## v3.1.0: Predictions ready for applications
 
