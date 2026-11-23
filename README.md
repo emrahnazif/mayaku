@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mayaku)](https://pypi.org/project/mayaku/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/emrahnazif/mayaku/blob/main/LICENSE)
 
+## Mayaku-Street
 ![Mayaku street models detecting and segmenting objects in street footage](https://raw.githubusercontent.com/emrahnazif/mayaku/main/docs/assets/mayaku-street.webp)
 
 **The most accurate nano detector to fine-tune on your own data.** Mayaku is a real-time
