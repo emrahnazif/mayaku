@@ -1,0 +1,135 @@
+"""Auto-config: dataset statistics, structural facts, the fine-tune recipe,
+and the rule that explicit user values always win."""
+
+from __future__ import annotations
+
+import pytest
+
+from mayaku.config import KeypointConfig, MayakuConfig, ModelConfig
+from mayaku.data.coco import load_coco
+from mayaku.health import health_check
+from mayaku.tuning import AUTO_PATHS, analyze_dataset, apply_auto_config, collect_set_paths
+from mayaku.tuning.recipe import ADAMW_LR, FINETUNE_EPOCHS
+
+from ._coco_fixture import synthetic_coco
+
+
+@pytest.fixture(scope="module")
+def coco(tmp_path_factory):
+    root = tmp_path_factory.mktemp("coco")
+    return load_coco(str(root), synthetic_coco(str(root), n=24), kpt=3)
+
+
+def test_stats_measure_boxes_on_the_canvas(coco) -> None:
+    raw = analyze_dataset(coco)
+    on_canvas = analyze_dataset(coco, (800, 800))
+    assert raw.num_images == 24 and raw.num_classes == 4 and raw.num_boxes > 24
+    assert sum(on_canvas.sqrt_areas) > sum(raw.sqrt_areas)   # images are upscaled onto 800
+    assert raw.aspect_ratios == pytest.approx(on_canvas.aspect_ratios, rel=1e-5)
+    assert raw.class_imbalance >= 1.0 and raw.num_degenerate_boxes == 0
+
+
+def test_auto_config_fills_structure_and_the_finetune_recipe(coco) -> None:
+    cfg, _ = apply_auto_config(MayakuConfig(), coco)
+    assert cfg.model.num_classes == 4 and cfg.input.canvas_hw is not None
+    assert cfg.train.epochs == FINETUNE_EPOCHS and cfg.train.final_epochs == 20
+    assert cfg.train.assigner_warmup == 0
+    # the warmup length stays the recipe's own
+    assert cfg.train.warmup_epochs == MayakuConfig().train.warmup_epochs
+
+
+def test_the_optimizer_follows_the_tier_and_adamw_the_class_count(coco) -> None:
+    n, _ = apply_auto_config(MayakuConfig(), coco)                       # 4 classes
+    assert n.train.optimizer == "adamw" and n.train.lr == pytest.approx(ADAMW_LR / (4 + 4))
+    m, _ = apply_auto_config(MayakuConfig(model=ModelConfig(tier="m")), coco)
+    assert (m.train.optimizer, m.train.lr) == ("sgd", MayakuConfig().train.lr)
+
+
+@pytest.mark.parametrize("raw", [{"train": {"optimizer": "sgd"}}, {"train": {"lr": 0.003}}],
+                         ids=["optimizer", "lr"])
+def test_pinning_the_optimizer_or_lr_keeps_the_recipes_other(coco, raw) -> None:
+    cfg, _ = apply_auto_config(MayakuConfig.model_validate(raw), coco, collect_set_paths(raw))
+    base = MayakuConfig.model_validate(raw).train
+    assert (cfg.train.optimizer, cfg.train.lr) == (base.optimizer, base.lr)
+
+
+@pytest.mark.parametrize("model", [ModelConfig(), ModelConfig(keypoints=KeypointConfig(num=3))],
+                         ids=["det", "kpt"])
+def test_every_change_is_an_allowed_path(coco, model) -> None:
+    _, changes = apply_auto_config(MayakuConfig(model=model), coco)
+    assert changes and {p for p, _, _ in changes} <= AUTO_PATHS
+
+
+def test_from_scratch_keeps_its_recipe(coco) -> None:
+    cfg, changes = apply_auto_config(MayakuConfig(), coco, finetune=False)
+    assert cfg.train == MayakuConfig().train
+    assert {p for p, _, _ in changes} == {"model.num_classes", "input.canvas_hw"}
+
+
+def test_keypoint_names_and_flip_pairs_come_from_the_data(coco) -> None:
+    cfg = MayakuConfig(model=ModelConfig(keypoints=KeypointConfig(num=3)))
+    cfg, _ = apply_auto_config(cfg, coco)
+    assert cfg.model.keypoints.names == ("tl", "ctr", "br")
+    assert cfg.model.keypoints.flip_pairs == ()
+
+
+def test_user_values_always_win(coco) -> None:
+    raw = {"model": {"num_classes": 4}, "input": {"canvas_hw": [576, 1024]},
+           "train": {"epochs": 5, "aug": {"mosaic": 0.9}}}
+    cfg = MayakuConfig.model_validate(raw)
+    cfg, changes = apply_auto_config(cfg, coco, collect_set_paths(raw))
+    assert cfg.model.num_classes == 4 and cfg.input.canvas_hw == (576, 1024)
+    assert cfg.train.epochs == 5 and cfg.train.aug.mosaic == 0.9
+    # the clean final stage is a share of whatever run the user pinned
+    assert cfg.train.final_epochs == 1
+    assert not {p for p, _, _ in changes} & collect_set_paths(raw)
+
+
+def test_a_pinned_clean_stage_survives_a_derived_run_length(coco) -> None:
+    raw = {"train": {"final_frac": 0.5}}
+    cfg, _ = apply_auto_config(MayakuConfig.model_validate(raw), coco, collect_set_paths(raw))
+    assert cfg.train.epochs == FINETUNE_EPOCHS and cfg.train.final_epochs == 50
+
+
+def test_disabled_fills_only_what_a_model_needs(coco) -> None:
+    cfg = MayakuConfig.model_validate({"auto_config": {"enabled": False}})
+    new, changes = apply_auto_config(cfg, coco)
+    assert new.model.num_classes == 4 and new.input.canvas_hw == (800, 800)
+    assert new.train == cfg.train and len(changes) == 2
+    pinned = MayakuConfig.model_validate({"auto_config": {"enabled": False},
+                                          "model": {"num_classes": 4},
+                                          "input": {"canvas_hw": [256, 384]}})
+    assert apply_auto_config(pinned, coco) == (pinned, [])
+
+
+def test_a_class_count_that_disagrees_with_the_data_raises(coco) -> None:
+    raw = {"model": {"num_classes": 7}}
+    with pytest.raises(ValueError, match="num_classes"):
+        apply_auto_config(MayakuConfig.model_validate(raw), coco, collect_set_paths(raw))
+
+
+def test_tiny_datasets_get_structure_only(tmp_path) -> None:
+    small = load_coco(str(tmp_path), synthetic_coco(str(tmp_path), n=5))
+    cfg, _ = apply_auto_config(MayakuConfig(), small)
+    assert cfg.model.num_classes == 4 and cfg.train == MayakuConfig().train
+
+
+def test_health_report(tmp_path) -> None:
+    ann = synthetic_coco(str(tmp_path), n=12)
+    r = health_check(ann, tmp_path)
+    assert r["images"] == 12 and r["classes"] == 4 and len(r["canvas"]) == 2
+    pinned = MayakuConfig.model_validate({"input": {"canvas_hw": [256, 384]}})
+    assert health_check(ann, tmp_path, pinned)["canvas"] == [256, 384]
+    assert abs(sum(r["object_size"].values()) - 1.0) < 0.02
+    assert set(r["class_counts"]) <= {"c0", "c1", "c2", "c3"} and r["warnings"] == []
+
+
+def test_a_mask_branch_without_masks_in_the_data_is_dropped(tmp_path) -> None:
+    box_only = load_coco(str(tmp_path), synthetic_coco(str(tmp_path), n=12, masks=False), masks=True)
+    seg = MayakuConfig(model=ModelConfig(seg=True))
+    cfg, changes = apply_auto_config(seg, box_only)
+    assert not cfg.model.seg and ("model.seg", True, False) in changes
+    # data with masks keeps the branch, and a user who pinned it keeps it too
+    with_masks = load_coco(str(tmp_path / "m"), synthetic_coco(str(tmp_path / "m"), n=12))
+    assert apply_auto_config(seg, with_masks)[0].model.seg
+    assert apply_auto_config(seg, box_only, {"model.seg"})[0].model.seg

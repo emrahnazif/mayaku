@@ -1,327 +1,185 @@
-"""TensorRT exporter — bonus deployment target on CUDA hosts.
+"""TensorRT: a serialized engine for NVIDIA GPUs, built from the ONNX graph.
 
-Mirrors `BACKEND_PORTABILITY_REPORT.md` §6 ("If ONNX works,
-``trtexec --onnx=...`` works for the backbone+heads body. Plugin only
-needed for fused NMS — keep NMS out of TRT entirely."). Same Graph A
-body export: backbone + FPN producing ``{p2..p6}``; the per-image
-Python glue (RPN top-k + per-class NMS, mask paste, keypoint
-sub-pixel decode) stays out of the engine entirely.
+fp16 (the default), int8 and fp32. An engine is specific to the GPU model and
+the TensorRT version it was built with, so build it on the machine that
+serves it. The engine format has no metadata slot, so the sidecar is
+length-prefixed in front of the engine bytes (`metadata.strip_tensorrt_header`
+removes it).
 
-The path is **ONNX → TensorRT**:
+int8 is the explicit int8 graph (the trained ranges as Q/DQ pairs, with add
+operands quantized and one scale per tensor, see `mayaku.model.quant`), so
+TensorRT runs exactly what was trained; it needs symmetric activation ranges
+(TensorRT has no zero point), the default since `model.qat_activations`.
 
-1. Use the existing :class:`ONNXExporter` to write a temp ``.onnx``
-   for the backbone+FPN body (already validated against eager — see
-   `tests/unit/test_onnx_export.py`).
-2. Parse that ONNX with TensorRT's :class:`tensorrt.OnnxParser` and
-   build a :class:`tensorrt.IBuilderConfig` engine.
-3. Serialise the engine to ``out_path`` (a ``.engine`` file).
-
-The Python builder API is preferred over shelling out to ``trtexec``
-because it's deterministic across PATH variations, gives us
-structured error messages on parse failures, and lets us pin a
-reproducible builder workspace size.
-
-Parity check loads the engine via :class:`tensorrt.Runtime`, runs it
-on CUDA via :mod:`tensorrt.cuda` allocations, and compares per-output
-to eager. Default tolerance is loose (``atol=1e-2``) because TRT's
-optimised kernel selection introduces small numerical drift on top of
-fp32 cuBLAS / cuDNN — that's the deal you take for the
-~3-10x speed-up.
+TensorRT 10 builds reduced precision from builder flags. TensorRT 11 is
+strongly typed: the flags are gone and the graph itself has to carry fp16, so
+the ONNX is converted first with NVIDIA ModelOpt AutoCast (the
+`nvidia-modelopt[onnx]` package), on a flat gray image, which converts every
+node, as TensorRT 10's fp16 flag does.
 """
 
 from __future__ import annotations
 
-import platform
-import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import torch
-from torch import Tensor, nn
 
-from mayaku.inference.export.base import ExportResult, ParityResult
-from mayaku.inference.export.onnx import ONNXExporter
+from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_header
+from mayaku.inference.export.onnx import onnx_graph
+from mayaku.inference.preprocess import Canvases, planar_tensor
+from mayaku.model import Detector
+from mayaku.utils.requirements import require
 
-__all__ = ["TensorRTExporter"]
-
-# Standard FPN output names (`Backbone.output_shape()` from Step 8).
-_DEFAULT_OUT_NAMES: tuple[str, ...] = ("p2", "p3", "p4", "p5", "p6")
-
-
-# 1 GiB workspace — enough for the ResNet-50 + FPN body without
-# inflating the build memory footprint to multi-GB.
-_DEFAULT_WORKSPACE_BYTES: int = 1 << 30
+PRECISIONS = ("fp16", "int8", "fp32")
+REGRID_INT8 = False   # no zero point: int8 keeps the trained symmetric grid (`mayaku.model.quant`)
 
 
-def _trt_install_hint() -> str:
-    # ``platform.system()`` returns plain ``str`` so mypy doesn't narrow
-    # it the way it does for ``sys.platform`` (Literal). Using the typed
-    # equivalent of ``sys.platform == "darwin"`` would mark the rest of
-    # this function unreachable on a darwin host under ``--strict``.
-    if platform.system() == "Darwin":
-        return "TensorRT is not supported on macOS."
+_WORKSPACE = 1 << 30
+
+
+def runnable() -> bool:
+    return torch.cuda.is_available()
+
+
+def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
+          sidecar: Mapping[str, Any], batch: int = 1) -> None:
+    """The engine at a fixed batch (1 for `export`, which checks it against
+    the model; a larger fixed batch for throughput)."""
+    import tensorrt as trt
+
+    from mayaku.model.quant import activation_scheme
+
     if not torch.cuda.is_available():
-        return "TensorRT requires a CUDA-enabled GPU (Linux or Windows)."
-    return "pip install mayaku[tensorrt]"
+        raise RuntimeError("building a TensorRT engine needs a CUDA GPU")
+    int8 = precision == "int8"
+    if int8 and activation_scheme(model) != "symmetric":
+        raise ValueError("TensorRT runs int8 with symmetric activation ranges only; this model "
+                         "was trained affine (train with model.qat_activations=symmetric)")
+    strongly_typed = int(trt.__version__.split(".")[0]) >= 11
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) if strongly_typed else 0
+    network = builder.create_network(flags)
+    parser = trt.OnnxParser(network, logger)
+    with onnx_graph(model, canvas, int8=int8, batch=batch, regrid=REGRID_INT8) as onnx:
+        if strongly_typed and precision != "fp32":
+            onnx = _fp16_graph(onnx, canvas, batch)
+        if not parser.parse(onnx.read_bytes()):
+            errors = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
+            raise RuntimeError(f"TensorRT could not parse the ONNX graph:\n{errors}")
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, _WORKSPACE)
+    if not strongly_typed:
+        if precision == "fp32":
+            config.clear_flag(trt.BuilderFlag.TF32)   # fp32 means fp32
+        else:
+            config.set_flag(trt.BuilderFlag.FP16)
+            if int8:
+                config.set_flag(trt.BuilderFlag.INT8)
+    engine = builder.build_serialized_network(network, config)
+    if engine is None:
+        raise RuntimeError("TensorRT failed to build the engine; see its log above")
+    path.write_bytes(bytes(engine))
+    embed_sidecar(path, "tensorrt", dict(sidecar))
 
 
-class TensorRTExporter:
-    """Export the backbone+FPN body to a TensorRT serialised engine.
+def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
+    """The ONNX graph in fp16 with fp32 inputs and outputs, for a strongly
+    typed build (TensorRT 11): ModelOpt AutoCast on a flat gray image, with
+    `data_max` raised from AutoCast's 512 to fp16's max, so only a value fp16
+    cannot hold on that image keeps a node in fp32 -- every node converts, as
+    TensorRT 10's fp16 flag converts it (neither guards overflow on real
+    images). Written next to `src`."""
+    import onnx
 
-    Args:
-        output_names: FPN feature output names. Defaults to
-            ``("p2", "p3", "p4", "p5", "p6")``.
-        fp16: If ``True`` enable FP16 mode — ~2x throughput at small
-            accuracy cost on most GPUs. Default ``False`` so parity
-            against eager fp32 stays tight.
-        workspace_bytes: TRT builder workspace cap. Default 1 GiB.
-        opset: ONNX opset for the intermediate ``.onnx``. Default 17
-            (matches :class:`ONNXExporter`).
-    """
+    require("modelopt")              # TensorRT 11's fp16 graph needs NVIDIA ModelOpt
+    from modelopt.onnx import autocast
 
-    name: str = "tensorrt"
-
-    def __init__(
-        self,
-        *,
-        output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        fp16: bool = False,
-        workspace_bytes: int = _DEFAULT_WORKSPACE_BYTES,
-        opset: int = 17,
-    ) -> None:
-        self.output_names: tuple[str, ...] = tuple(output_names)
-        self.fp16 = fp16
-        self.workspace_bytes = workspace_bytes
-        self.opset = opset
-
-    # ------------------------------------------------------------------
-    # Export
-    # ------------------------------------------------------------------
-
-    def export(
-        self,
-        model: nn.Module,
-        sample: Tensor,
-        out_path: Path,
-        **opts: object,
-    ) -> ExportResult:
-        """Build a serialised TRT engine for ``model.backbone``.
-
-        Implementation: ONNXExporter → ``tempfile`` → TRT
-        :class:`OnnxParser` + :class:`Builder` → ``out_path``.
-        """
-        del opts
-        # Lazy import — tensorrt is CUDA-only and lives behind the
-        # `[tensorrt]` extra.
-        try:
-            import tensorrt as trt
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(_trt_install_hint()) from e
-
-        # A TRT engine build needs a live CUDA device: ``trt.Builder`` (and
-        # cuDNN/cuBLAS tactic selection) call C++ ``abort()`` when no device
-        # is visible, which crashes the whole process (SIGABRT) instead of
-        # raising. Fail fast with a catchable error so callers — and the
-        # dispatch tests on CPU-only / ``CUDA_VISIBLE_DEVICES=""`` hosts —
-        # get a clean Python exception.
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "TensorRT engine build requires a visible CUDA device, but "
-                "torch.cuda.is_available() is False (no GPU, or "
-                "CUDA_VISIBLE_DEVICES is empty). Build the engine on a CUDA host."
-            )
-
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            onnx_path = Path(tmp) / "body.onnx"
-            # Trace on the model's own device — passing a CPU sample to a
-            # CUDA model trips "weight type vs input type" at the first
-            # conv. Tests deliberately put the model on CUDA so the
-            # engine is built on the host that will run it.
-            trace_device = next(iter(model.parameters())).device
-            ONNXExporter(opset=self.opset, output_names=self.output_names).export(
-                model, sample.to(trace_device), onnx_path
-            )
-
-            logger = trt.Logger(trt.Logger.ERROR)
-            builder = trt.Builder(logger)
-            network = builder.create_network(
-                1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-            )
-            parser = trt.OnnxParser(network, logger)
-            with open(onnx_path, "rb") as fh:
-                if not parser.parse(fh.read()):
-                    msgs = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
-                    raise RuntimeError(f"TensorRT ONNX parser failed:\n{msgs}")
-
-            config = builder.create_builder_config()
-            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, self.workspace_bytes)
-            if self.fp16 and builder.platform_has_fast_fp16:
-                config.set_flag(trt.BuilderFlag.FP16)
-            else:
-                # TF32 is on by default in TRT 10.x and produces ~0.1-0.3
-                # abs drift vs cuDNN fp32 on Ampere+ GPUs, breaking the
-                # strict parity check (analogous to OpenVINO's silent
-                # fp16 default — see openvino.py for the equivalent
-                # `INFERENCE_PRECISION_HINT=f32` pin). Clear it on the
-                # default fp32 path so the parity test pins real fp32
-                # numerics; the fp16 path inherently expects drift and
-                # users opt into it explicitly.
-                config.clear_flag(trt.BuilderFlag.TF32)
-
-            # ONNXExporter declares dynamic batch + spatial axes; TRT
-            # 10.x refuses to build a dynamic-shape network without an
-            # IOptimizationProfile. Pin a single point at sample.shape —
-            # callers that want a real shape envelope can re-export
-            # against a TensorRTExporter that takes min/opt/max args (a
-            # natural follow-up once the basic CUDA path is green).
-            profile = builder.create_optimization_profile()
-            shape = tuple(sample.shape)
-            profile.set_shape("image", min=shape, opt=shape, max=shape)
-            config.add_optimization_profile(profile)
-
-            serialised = builder.build_serialized_network(network, config)
-            if serialised is None:
-                raise RuntimeError(
-                    "TensorRT builder.build_serialized_network returned None — "
-                    "see TRT logger output for the failing layer"
-                )
-            with open(out_path, "wb") as fh:
-                fh.write(bytes(serialised))
-
-        return ExportResult(
-            path=out_path,
-            target=self.name,
-            opset=self.opset,
-            input_names=("image",),
-            output_names=self.output_names,
-            extras={
-                "fp16": str(self.fp16),
-                "workspace_bytes": str(self.workspace_bytes),
-                "trt_version": getattr(trt, "__version__", "unknown"),
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # Parity
-    # ------------------------------------------------------------------
-
-    def parity_check(
-        self,
-        model: nn.Module,
-        exported_path: Path,
-        sample: Tensor,
-        *,
-        atol: float = 1e-2,
-        rtol: float = 1e-2,
-    ) -> ParityResult:
-        """Run eager + TRT engine on ``sample`` and compare per-output.
-
-        Both halves run on CUDA — eager uses whatever device ``model``
-        lives on (must be ``cuda:*`` for a meaningful comparison); TRT
-        uses ``cuda:0`` by default. Default tolerance is loose
-        (``atol=1e-2``) to absorb TRT's kernel-selection drift; pass
-        a tighter value if you've validated a specific build.
-        """
-        try:
-            import tensorrt as trt
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(_trt_install_hint()) from e
-
-        backbone = _resolve_backbone(model)
-        backbone.eval()
-        device = next(iter(backbone.parameters())).device
-        if device.type != "cuda":
-            raise RuntimeError(f"TensorRT parity check requires a CUDA model; got device={device}")
-
-        # Force strict fp32 on the eager half to match the TRT engine
-        # built with `BuilderFlag.TF32` cleared. PyTorch enables TF32
-        # for cuDNN convs and matmuls by default on Ampere+ GPUs, so
-        # without this the eager forward uses TF32 and TRT uses fp32 —
-        # the two disagree by ~0.25 abs even though both are nominally
-        # "fp32 paths". Restore the user's settings on the way out so
-        # the parity check is a no-op on global state.
-        prev_matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
-        prev_cudnn_tf32 = torch.backends.cudnn.allow_tf32
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        try:
-            with torch.no_grad():
-                eager_out = backbone(sample.to(device))
-        finally:
-            torch.backends.cuda.matmul.allow_tf32 = prev_matmul_tf32
-            torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
-
-        logger = trt.Logger(trt.Logger.ERROR)
-        runtime = trt.Runtime(logger)
-        with open(exported_path, "rb") as fh:
-            engine = runtime.deserialize_cuda_engine(fh.read())
-        if engine is None:
-            raise RuntimeError(f"failed to deserialise TRT engine at {exported_path}")
-
-        context = engine.create_execution_context()
-        # Set the input shape (TRT 10.x wants this even for static
-        # shapes, since networks are EXPLICIT_BATCH by default).
-        context.set_input_shape("image", tuple(sample.shape))
-
-        # Allocate device buffers per binding via torch (saves us
-        # rolling our own pycuda / cuda-python).
-        bindings: list[int] = []
-        outputs_t: dict[str, Tensor] = {}
-        # Inputs first.
-        sample_cuda = sample.to(device).contiguous()
-        bindings.append(int(sample_cuda.data_ptr()))
-        # Outputs.
-        for name in self.output_names:
-            shape = tuple(context.get_tensor_shape(name))
-            buf = torch.empty(shape, dtype=torch.float32, device=device)
-            outputs_t[name] = buf
-            bindings.append(int(buf.data_ptr()))
-
-        # Bind tensor addresses (TRT 10.x API).
-        context.set_tensor_address("image", int(sample_cuda.data_ptr()))
-        for name, buf in outputs_t.items():
-            context.set_tensor_address(name, int(buf.data_ptr()))
-
-        stream = torch.cuda.Stream(device=device)  # type: ignore[no-untyped-call]
-        with torch.cuda.stream(stream):
-            ok = context.execute_async_v3(stream_handle=stream.cuda_stream)
-        if not ok:
-            raise RuntimeError("TensorRT execute_async_v3 returned False")
-        stream.synchronize()
-
-        per_output: dict[str, tuple[float, float]] = {}
-        max_abs = 0.0
-        max_rel = 0.0
-        for name in self.output_names:
-            trt_t = outputs_t[name].to("cpu")
-            eager_t = eager_out[name].to("cpu")
-            abs_err = float((trt_t - eager_t).abs().max().item())
-            rel_err = float(((trt_t - eager_t).abs() / eager_t.abs().clamp(min=1e-8)).max().item())
-            per_output[name] = (abs_err, rel_err)
-            max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-
-        passed = max_abs <= atol or max_rel <= rtol
-        return ParityResult(
-            target=self.name,
-            passed=passed,
-            max_abs_error=max_abs,
-            max_rel_error=max_rel,
-            atol=atol,
-            rtol=rtol,
-            per_output=per_output,
-        )
+    gray = np.full((batch, 3, *canvas), 114 / 255, np.float32)
+    out = src.with_suffix(".fp16.onnx")
+    onnx.save(autocast.convert_to_mixed_precision(str(src), low_precision_type="fp16", keep_io_types=True,
+                                                  calibration_data={"images": gray},
+                                                  data_max=float(np.finfo(np.float16).max)), str(out))
+    return out
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+class Session:
+    """The engine on the current CUDA device, with torch tensors as its I/O
+    buffers. The BGR canvases cross as bytes through a reused pinned buffer;
+    the planar RGB transpose, the 1/255 and the engine run as one CUDA graph.
+    The maps stay on the GPU, so the decode runs there too and only the final
+    detections come back."""
 
+    def __init__(self, path: Path, outputs: list[str], precision: str, device: str = "auto"):
+        import tensorrt as trt
 
-def _resolve_backbone(model: nn.Module) -> nn.Module:
-    if hasattr(model, "backbone") and isinstance(model.backbone, nn.Module):
-        return model.backbone
-    return model
+        runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+        self._engine = runtime.deserialize_cuda_engine(strip_tensorrt_header(path))
+        self._ctx = self._engine.create_execution_context()
+        # an engine runs on a CUDA device whatever `device` says
+        self._device = torch.device(device if device.startswith("cuda") else "cuda")
+        name = self._engine.get_tensor_name(0)
+        self._input = torch.empty(tuple(self._engine.get_tensor_shape(name)),
+                                  dtype=torch.float32, device=self._device)
+        self._ctx.set_tensor_address(name, self._input.data_ptr())
+        b, _, h, w = self._input.shape
+        self.batch, self.input_hw = int(b), (int(h), int(w))
+        self._host = torch.empty((b, h, w, 3), dtype=torch.uint8).pin_memory()
+        self._pixels = torch.empty((b, h, w, 3), dtype=torch.uint8, device=self._device)
+        self._uploaded = torch.cuda.Event()      # recorded after each upload
+        self._pending = False
+        self._out = {n: torch.empty(tuple(self._engine.get_tensor_shape(n)),
+                                    dtype=torch.float32, device=self._device)
+                     for n in outputs}
+        for n, t in self._out.items():
+            self._ctx.set_tensor_address(n, t.data_ptr())
+        self.outputs = outputs
+        self._graph: torch.cuda.CUDAGraph | None = None
+
+    def canvases(self, n: int) -> Canvases | None:
+        """The pinned upload buffer, once the last upload has left it; the
+        caller letterboxes into it and `__call__` sends it without a copy."""
+        if n > self.batch:
+            return None
+        self._wait()
+        return self._host.numpy()[:n]
+
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        # no sync after the upload: work on the maps is ordered after the
+        # engine on this stream
+        if x.ctypes.data != self._host.data_ptr():
+            self._wait()
+            self._host.numpy()[:len(x)] = x
+        self._pixels.copy_(self._host, non_blocking=True)
+        self._uploaded.record(torch.cuda.current_stream(self._device))
+        self._pending = True
+        if self._graph is None:
+            self._graph = self._capture()
+        else:
+            self._graph.replay()
+        return [self._out[n] for n in self.outputs]
+
+    def _wait(self) -> None:
+        """Until the last upload has left the pinned buffer."""
+        if self._pending:
+            self._uploaded.synchronize()
+            self._pending = False
+
+    def _run(self) -> None:
+        planar_tensor(self._pixels, out=self._input)
+        self._ctx.execute_async_v3(torch.cuda.current_stream(self._device).cuda_stream)
+
+    def _capture(self) -> torch.cuda.CUDAGraph:
+        """Run once (TensorRT's lazy setup cannot be captured), then record the
+        input conversion and the engine as one CUDA graph that later calls
+        replay: one launch instead of one per layer, which at small sizes is
+        what bounds the latency."""
+        self._run()
+        torch.cuda.current_stream(self._device).synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.device(self._device), torch.cuda.graph(graph):
+            self._run()
+        return graph

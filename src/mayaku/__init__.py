@@ -1,33 +1,30 @@
 from __future__ import annotations
 
 import os
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _metadata_version
 
-# PYTORCH_ENABLE_MPS_FALLBACK must be set BEFORE PyTorch's MPS backend
-# initialises, otherwise ops without an MPS implementation raise
-# NotImplementedError instead of falling back to CPU. Setting it later
-# (inside ``mayaku.cli.train.run_train``) is too late — by then
-# ``import torch`` has already snapshotted the env. We use ``setdefault``
-# so a user-set value (including the explicit ``"0"`` opt-out) wins.
-# The variable is harmless on non-MPS hosts, so unconditional set is fine.
+# PYTORCH_ENABLE_MPS_FALLBACK must be set before PyTorch's MPS backend
+# initialises, or an op without an MPS kernel raises instead of falling back
+# to the CPU; torch snapshots the environment at import, so it is set here,
+# first. ``setdefault`` lets a user-set value (including an explicit "0")
+# win, and the variable is harmless on hosts without MPS.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-# Single-sourced from the installed distribution metadata (pyproject's
-# ``version``) so this can never drift from what pip reports. The fallback
-# covers running straight from a source tree with no install.
-try:
-    __version__ = _metadata_version("mayaku")
-except PackageNotFoundError:  # pragma: no cover - source tree without install
-    __version__ = "0.0.0"
+# The single source of truth for the version. `pyproject.toml` declares
+# `dynamic = ["version"]` and hatchling reads this literal out of the file at
+# build time (by regex, without importing it), so the distribution metadata and
+# `mayaku.__version__` cannot drift apart. Keeping the literal here rather than
+# reading it back from `importlib.metadata` also means a source tree with no
+# install reports its real version instead of a `0.0.0` placeholder — that
+# string is stamped into every checkpoint's provenance sidecar.
+__version__ = "3.1.1"
 
 # Eager top-level exports. Every entry point pulls in torch anyway (this is a
 # PyTorch CV library — there is no torch-free code path to protect), so there
 # is nothing to defer, and eager imports are what let IDEs and type checkers
 # resolve ``from mayaku import train``. They sit after the env-var set above
 # because torch snapshots the env at import time.
-from mayaku.api import evaluate, train
+from mayaku.api import evaluate, train, tune_predict
 from mayaku.health import health_check
 from mayaku.inference import from_pretrained
 
-__all__ = ["evaluate", "from_pretrained", "health_check", "train"]
+__all__ = ["evaluate", "from_pretrained", "health_check", "train", "tune_predict"]

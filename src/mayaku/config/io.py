@@ -6,16 +6,14 @@ just bridge YAML on disk and an in-memory pydantic model, plus a
 recursive deep-merge for partial overrides (CLI flags, fragment
 configs).
 
-We deliberately do **not** support ``_BASE_``-style YAML inheritance
-(`DETECTRON2_TECHNICAL_SPEC.md` §6.1). Per the spec's own §9.1
-recommendation, the inheritance chain causes more confusion than it
-removes; users who want fragment composition should construct a
-:class:`MayakuConfig` in Python and call :func:`merge_overrides` once.
+There is deliberately no YAML inheritance: an inheritance chain causes more
+confusion than it removes. Compose fragments by constructing a
+:class:`MayakuConfig` in Python and calling :func:`merge_overrides` once.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +22,30 @@ import yaml
 from mayaku.config.schemas import MayakuConfig
 
 __all__ = [
+    "drop_retired",
     "dump_yaml",
     "load_yaml",
     "merge_overrides",
+    "parse_assignments",
+    "read_yaml",
     "to_yaml_string",
 ]
+
+
+# Fields the schema no longer has, as (section, field). Configs written while
+# they existed -- a run's config.yaml, a checkpoint's sidecar -- still carry
+# them; they are dropped on read so those files keep loading, while any other
+# unknown key still fails validation.
+RETIRED = (("train", "warmup_iters_min"), ("train", "int8_check_images"))
+
+
+def drop_retired(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of the config mapping `raw` without the `RETIRED` fields."""
+    out = dict(raw)
+    for section, field in RETIRED:
+        if isinstance(out.get(section), Mapping) and field in out[section]:
+            out[section] = {k: v for k, v in out[section].items() if k != field}
+    return out
 
 
 def load_yaml(path: str | Path) -> MayakuConfig:
@@ -39,13 +56,20 @@ def load_yaml(path: str | Path) -> MayakuConfig:
     :class:`InputConfig` defaults). Unknown keys at any level raise
     ``ValidationError`` so typos fail loudly.
     """
+    return read_yaml(path)[1]
+
+
+def read_yaml(path: str | Path) -> tuple[dict[str, Any], MayakuConfig]:
+    """`load_yaml`, also returning the parsed mapping as written: the keys a
+    user set, which auto-config must leave alone."""
     text = Path(path).read_text(encoding="utf-8")
     raw = yaml.safe_load(text) or {}
     if not isinstance(raw, Mapping):
         raise ValueError(
             f"YAML at {path} must be a mapping at the top level; got {type(raw).__name__}"
         )
-    return MayakuConfig.model_validate(dict(raw))
+    raw = drop_retired(raw)
+    return raw, MayakuConfig.model_validate(raw)
 
 
 def dump_yaml(config: MayakuConfig, path: str | Path) -> None:
@@ -63,7 +87,7 @@ def to_yaml_string(config: MayakuConfig) -> str:
     diffs over time stay meaningful. ``default_flow_style=False`` keeps
     nested maps in block form so the output is human-readable.
     """
-    payload = config.model_dump(mode="python")
+    payload = config.model_dump(mode="json")
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
 
 
@@ -75,10 +99,8 @@ def merge_overrides(config: MayakuConfig, overrides: Mapping[str, Any]) -> Mayak
     leaf value replaces the corresponding field. Returns a *new*
     :class:`MayakuConfig`; ``config`` is unchanged.
 
-    This is the simple, dataclass-friendly equivalent of Detectron2's
-    ``cfg.merge_from_list`` / ``LazyConfig.apply_overrides`` (`DETECTRON2_TECHNICAL_SPEC.md`
-    §6.1, §6.4) — without the dotted-key string parsing, which the CLI
-    layer in Step 17 will translate.
+    Nested mappings reach into the training recipe too:
+    ``{"train": {"aug": {"mixup": 0.1}}}`` changes that one field.
     """
     merged = _deep_merge(config.model_dump(mode="python"), overrides)
     return MayakuConfig.model_validate(merged)
@@ -92,3 +114,22 @@ def _deep_merge(base: Any, override: Any) -> Any:
             merged[k] = _deep_merge(base.get(k), v) if k in merged else v
         return merged
     return override
+
+
+def parse_assignments(assignments: Iterable[str]) -> dict[str, Any]:
+    """``["train.lr=0.005", "model.tier=s"]`` -> the nested overrides mapping
+    ``{"train": {"lr": 0.005}, "model": {"tier": "s"}}``. Each value is read
+    as YAML, so numbers, booleans, null and ``[h, w]`` lists get their types."""
+    out: dict[str, Any] = {}
+    for a in assignments:
+        key, sep, value = a.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"expected key=value, got {a!r}")
+        *parents, leaf = key.strip().split(".")
+        node = out
+        for p in parents:
+            node = node.setdefault(p, {})
+            if not isinstance(node, dict):
+                raise ValueError(f"{key} sets inside a field that was given a value")
+        node[leaf] = yaml.safe_load(value)
+    return out

@@ -1,0 +1,82 @@
+"""The architecture family: one frozen `Tier` per size, n / s / m / l."""
+
+import dataclasses
+
+from mayaku.model.blocks import STRIDES
+
+
+@dataclasses.dataclass(frozen=True)
+class Tier:
+    """One member of the family. Frozen and hashable; vary one with
+    `dataclasses.replace(TIERS["n"], seg=True)`."""
+
+    stem: int
+    width: tuple                    # backbone stage widths, fine to coarse
+    depth: tuple                    # bottlenecks per stage, fine to coarse
+    neck: tuple                     # neck width per level, fine to coarse
+    paths: int                      # neck pathways
+    head_width: int = 0             # head tower width; 0 = the neck's width per level
+    head_conv: int = 2              # 3x3 convolutions per head tower
+    reg_max: int = 16               # DFL bins per box side
+    # Auxiliary dense heads, off by default. Turning them on adds `aux.*`
+    # weights only; see `load_weights`.
+    seg: bool = False               # instance masks
+    kpt: int = 0                    # keypoints per instance (0 = none)
+    aux_arm: str = "box_tower"      # per-anchor aux outputs read from: "box_tower" | "tower"
+    aux_width: int = 64             # trunk width of the aux branch (and of its own towers)
+    mask_stride: int = 8            # stride of the mask feature: 8 (the trunk's) or 4
+    # Backbone layout: `stem_mid` > 0 gives the two-conv stem 3 -> stem_mid
+    # -> stem, `s4_depth` bottlenecks at stride 4, `expansion` the bottleneck
+    # ratio of every block, `global_ctx` the global-context term in the
+    # spatial pyramid pooling.
+    stem_mid: int = 0
+    s4_depth: int = 0
+    expansion: int = 4
+    global_ctx: bool = False
+    # Oriented boxes: an angle readout per level, sides along the box's axes
+    # (`mayaku.model.obb`). A detection task of its own, so not combined with
+    # the mask / keypoint branches.
+    obb: bool = False
+
+    def __post_init__(self):
+        n = len(STRIDES)
+        assert len(self.width) == len(self.depth) == len(self.neck) == n, \
+            "one width, depth and neck width per stride in %s" % (STRIDES,)
+        assert min(self.width) > 0 and min(self.depth) > 0 and min(self.neck) > 0
+        assert self.paths >= 1
+        assert self.head_width >= 0 and self.head_conv >= 1
+        assert self.aux_arm in ("box_tower", "tower"), self.aux_arm
+        assert self.kpt >= 0 and self.aux_width >= 8
+        assert self.mask_stride in (4, 8), self.mask_stride
+        assert self.stem_mid >= 0 and self.s4_depth >= 0 and self.expansion in (1, 2, 4)
+        assert not (self.obb and (self.seg or self.kpt)), \
+            "oriented boxes are a task of their own: no masks or keypoints"
+
+
+# Widths are multiples of 32. Every tier spends about half its compute in
+# the backbone, at strides 4-16: a two-conv stem into a stride-4 stage, the
+# 3x3s at half width, and global context in the pyramid pooling, with the
+# neck's stride 32 at about three quarters of the backbone's (narrower lost
+# large objects on m). s and l follow n and m's layout but are not
+# pretrained yet.
+TIERS = {
+    # 6.7 GMACs at 640, the backbone 41% of them
+    "n": Tier(stem=32, stem_mid=16, s4_depth=2, width=(96, 192, 320), depth=(3, 3, 2),
+              expansion=2, global_ctx=True, neck=(64, 128, 256), paths=3, head_width=80),
+    # about 20 GMACs at 640, the backbone about 41% of them
+    "s": Tier(stem=32, stem_mid=16, s4_depth=2, width=(192, 320, 512), depth=(3, 4, 2),
+              expansion=2, global_ctx=True, neck=(128, 224, 384), paths=3, head_width=128),
+    # stride 8 / 16 wider and depth moved off stride 32; a three-path neck
+    # with stride 32 at 576 (narrower lost large objects). 46.3 GMACs at 640,
+    # the backbone 46% of them
+    "m": Tier(stem=64, stem_mid=32, s4_depth=2, width=(288, 448, 768), depth=(4, 4, 3),
+              expansion=2, global_ctx=True, neck=(192, 320, 576), paths=3, head_width=192),
+    # about 82 GMACs at 640, the backbone about 48% of them
+    "l": Tier(stem=64, stem_mid=32, s4_depth=2, width=(384, 576, 1024), depth=(4, 6, 3),
+              expansion=2, global_ctx=True, neck=(256, 384, 768), paths=3, head_width=256),
+}
+
+# Not a product tier: a few tens of thousands of parameters, so a test can
+# train a real network end to end in seconds.
+TINY = Tier(stem=8, width=(16, 32, 64), depth=(1, 1, 1), neck=(16, 16, 16),
+            paths=1, head_conv=1, reg_max=8)
