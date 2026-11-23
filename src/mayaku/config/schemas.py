@@ -75,8 +75,9 @@ class ModelConfig(_BaseModel):
     `qat` trains quantization-aware, on every tier by default, so each model
     deploys in int8 as well as float; False trains float only.
     `qat_activations` is the int8 activation scheme it trains for: symmetric
-    (the default) runs on every int8 runtime, TensorRT included; affine uses
-    the whole int8 grid on one-sided ReLU outputs, but TensorRT cannot run it.
+    (the default) runs on every int8 runtime, TensorRT included (ONNX and
+    OpenVINO exports still give one-sided ReLU outputs the whole int8 grid);
+    affine uses the whole grid in training too, but TensorRT cannot run it.
     Checkpoints from before this setting existed are affine.
     `obb` predicts oriented boxes (`mayaku.model.obb`), from each object's
     polygon in the annotations (its minimum-area rectangle); not combined

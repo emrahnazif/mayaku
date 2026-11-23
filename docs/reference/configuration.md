@@ -1,9 +1,10 @@
----
-title: Configuration reference
+# Configuration reference
+
+<!--
 summary: Every configuration field with its default and meaning, and the ways to set them from the CLI, Python or YAML.
 label: Configuration
 keywords: mayaku, configuration, yaml, hyperparameters, training recipe
----
+-->
 
 One configuration describes a model and how it is trained. It has five sections: `model`, `input`, `train`, `dataloader` and `auto_config`. Every run saves its full resolved configuration to `train/config.yaml`, and every checkpoint and exported file carries a copy.
 
@@ -59,7 +60,7 @@ Rules:
 
 - **Unknown fields are errors** at every level. `--set train.lerning_rate=0.01` fails instead of being ignored.
 - Values are validated. A wrong type, an out-of-range value, or a size that isn't a multiple of 32 fails before training starts.
-- A field you set is never changed by [auto-config](/mayaku/data-and-training/training/#auto-config).
+- A field you set is never changed by [auto-config](/docs/data-and-training/training.md#auto-config).
 - There is no YAML inheritance. To combine settings, merge them in Python with `merge_overrides`.
 - When resuming a run, the configuration comes from the saved state and can't be changed.
 
@@ -77,15 +78,15 @@ Which network: the task, the size, and the heads.
 
 | Field | Default | Values | Meaning |
 |---|---|---|---|
-| `model.task` | `detect` | `detect`, `classify` | `classify` builds an image classifier on the backbone (see [Classification](/mayaku/more-tasks/classification/)). Every detection-family task, including segmentation, keypoints and oriented boxes, is `detect`. |
-| `model.tier` | `n` | `n`, `s`, `m`, `l` | Model size. See [Models](/mayaku/data-and-training/models/#sizes). Must match the warm-start weights. |
+| `model.task` | `detect` | `detect`, `classify` | `classify` builds an image classifier on the backbone (see [Classification](/docs/more-tasks/classification.md)). Every detection-family task, including segmentation, keypoints and oriented boxes, is `detect`. |
+| `model.tier` | `n` | `n`, `s`, `m`, `l` | Model size. See [Models](/docs/data-and-training/models.md#sizes). Must match the warm-start weights. |
 | `model.num_classes` | `null` | integer > 0 | `null` takes it from the training data. Setting it to a different count than the data is an error. |
-| `model.seg` | `false` | bool | Adds the instance mask branch. See [Segmentation](/mayaku/more-tasks/segmentation/). |
-| `model.keypoints` | `null` | mapping | Adds the keypoint branch. See below and [Keypoints](/mayaku/more-tasks/keypoints/). |
-| `model.obb` | `false` | bool | Predicts oriented boxes. Can't be combined with `seg` or `keypoints`. See [Oriented boxes](/mayaku/more-tasks/oriented-boxes/). |
+| `model.seg` | `false` | bool | Adds the instance mask branch. See [Segmentation](/docs/more-tasks/segmentation.md). |
+| `model.keypoints` | `null` | mapping | Adds the keypoint branch. See below and [Keypoints](/docs/more-tasks/keypoints.md). |
+| `model.obb` | `false` | bool | Predicts oriented boxes. Can't be combined with `seg` or `keypoints`. See [Oriented boxes](/docs/more-tasks/oriented-boxes.md). |
 | `model.mask_stride` | `8` | `4`, `8` | Resolution of the mask features. `4` gives finer masks at more cost. |
 | `model.aux_arm` | `box_tower` | `box_tower`, `tower` | Where the mask and keypoint branches read per-location features from: the detection head's box tower, or a separate small tower per level. |
-| `model.qat` | `true` | bool | Quantization-aware training, so the model can export to int8. See [Export](/mayaku/deployment/export/#int8). |
+| `model.qat` | `true` | bool | Quantization-aware training, so the model can export to int8. See [Export](/docs/deployment/export.md#int8). |
 | `model.qat_activations` | `symmetric` | `symmetric`, `affine` | The int8 activation scheme trained for. `symmetric` runs on every int8 runtime, TensorRT included. `affine` uses the int8 range more fully but can't run on TensorRT. |
 
 ### model.keypoints
@@ -107,7 +108,7 @@ The canvas: the fixed input size every image is letterboxed onto, for training, 
 | `input.size_budget` | `800` | The canvas has at most `size_budget²` pixels. Must be a multiple of 32. The command-line shortcut is `--size-budget`. For classifiers the default is 224. |
 | `input.canvas_hw` | `null` | The canvas `[height, width]`. `null` lets auto-config pick the shape that fits your data's aspect ratio under the budget. Set it to fix the canvas exactly. Both sides must be multiples of 32. |
 
-See [Training: input size](/mayaku/data-and-training/training/#input-size).
+See [Training: input size](/docs/data-and-training/training.md#input-size).
 
 ## train
 
@@ -130,6 +131,7 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | `train.warmup_epochs` | `3.0` | Warmup length in epochs: the learning-rate ramp, and the ramp of micro-batches per step (see `lr_ref_batch`). |
 | `train.warmup_momentum_start` | `0.8` | Momentum at the start of warmup. |
 | `train.warmup_bias_lr_start` | `0.1` | Bias learning rate at the start of warmup. It ramps down to `lr`. SGD and MuSGD only: under `adamw` biases warm up from `0` like every other weight. |
+| `train.rescale_pretrained` | `1.5` | Warm starts only: pretrained convolutions that feed a BatchNorm are scaled up to at least this multiple of their initial weight norm. The output is unchanged, so early fine-tuning doesn't erase the pretrained features. `0` turns it off. |
 | `train.seed` | `0` | Random seed. |
 | `train.amp` | `true` | Mixed-precision training. Applies on CUDA only. |
 | `train.sync_bn` | `true` | Multi-GPU only: BatchNorm statistics over the whole batch rather than each GPU's share. |
@@ -155,6 +157,8 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | `train.loc_weight_floor` | `0.0` | Minimum weight of the box and DFL loss per positive. `0` is off. |
 | `train.seg_gain` | `2.0` | Weight of the mask (Dice) loss. |
 | `train.seg_cap` | `250` | Maximum positives per batch for the mask loss. |
+| `train.kpt_gain` | `1.0` | Weight of the keypoint losses. |
+| `train.obb_angle_gain` | `1.0` | Weight of the oriented-box angle loss, `sin²(2 × angle error)`. |
 
 ### train.aug
 
@@ -174,17 +178,22 @@ Classifiers use `hflip`, `vflip` and `hsv`, plus their own random crop, which is
 
 ### Decode settings
 
-Post-processing used during evaluation and saved into the checkpoint for prediction and export.
+Post-processing saved into the checkpoint. `train.decode` is what evaluation uses (COCO AP needs every detection); `train.predict` is what a prediction call uses.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `train.decode.conf` | `0.001` | Minimum score. Low, as COCO AP needs. You can override it on each prediction call with `conf=`. |
-| `train.decode.iou` | `0.7` | NMS overlap threshold. |
+| `train.decode.conf` | `0.001` | Minimum score for evaluation. Low, as COCO AP needs. |
+| `train.decode.iou` | `0.7` | NMS overlap threshold for evaluation. |
 | `train.decode.max_det` | `300` | Maximum detections per image. |
 | `train.decode.topk` | `1000` | Candidates kept before NMS. |
 | `train.decode.multi_label` | `true` | Allow one box to be reported under several classes. |
+| `train.predict.conf` | `0.4` | Minimum score for predictions. Left at the default, it is chosen on the validation split at the end of training; set it to keep your own. You can override it on each call with `conf=`. |
+| `train.predict.iou` | `0.5` | NMS overlap threshold for predictions. |
+| `train.predict.max_det` | `300` | Maximum detections per image. |
+| `train.predict.topk` | `1000` | Candidates kept before NMS. |
+| `train.predict.multi_label` | `false` | Each location gives at most its best class. |
 
-See [Prediction: the score threshold](/mayaku/deployment/prediction/#the-score-threshold).
+See [Prediction: the score threshold](/docs/deployment/prediction.md#the-score-threshold).
 
 ## dataloader
 
@@ -198,4 +207,4 @@ See [Prediction: the score threshold](/mayaku/deployment/prediction/#the-score-t
 |---|---|---|
 | `auto_config.enabled` | `true` | Fill unset fields from the training data. With `false`, only the class count and a square canvas at the size budget are filled. |
 
-See [Training: auto-config](/mayaku/data-and-training/training/#auto-config).
+See [Training: auto-config](/docs/data-and-training/training.md#auto-config).

@@ -1,13 +1,31 @@
----
-title: Pretrained models, sizes and downloads
-summary: The hosted model names, the model sizes with their parameters and compute, and how weights download.
+# Models: base and ready-to-use, sizes, downloads
+
+<!--
+summary: The two kinds of hosted models, base models to fine-tune and ready-to-use models, their sizes, and how weights download.
 label: Models
-keywords: mayaku, pretrained models, model zoo, model sizes, download
----
+keywords: mayaku, pretrained models, model zoo, fine-tuning, model sizes, download
+-->
 
-## Hosted pretrained models
+## Two kinds of models
 
-Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pretrained(...)`, `mayaku predict`, `mayaku eval`, `mayaku export`). The checkpoint downloads the first time it is used.
+Mayaku hosts two kinds of models, and they are for different jobs:
+
+- **Base models** are a starting point for training on your own data. They are pretrained on Objects365 to learn what objects look like in general, and become accurate once you fine-tune them on your images and classes. They are not built to be used as they are.
+- **Ready-to-use models** are finished models for one kind of scene. Download one by name and predict, no training needed. You can still fine-tune them.
+
+Which one to start from:
+
+1. **A ready-to-use model covers your objects and your cameras:** use it as it is.
+2. **One comes close but not quite** (your own classes, an unusual camera, more accuracy on your scenes): fine-tune that ready-to-use model. It already knows those scenes.
+3. **None covers your task:** fine-tune a base model.
+
+Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pretrained(...)`, `mayaku predict`, `mayaku eval`, `mayaku export`). The checkpoint downloads the first time it is used. To see what is currently hosted:
+
+```bash
+mayaku download --list
+```
+
+## Base models
 
 | Name | Size | Task | Status |
 |---|---|---|---|
@@ -16,13 +34,21 @@ Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pre
 | `mayaku-m-det` | medium | Object detection | released |
 | `mayaku-m-seg` | medium | Instance segmentation | released |
 
-All are pretrained on Objects365. The pattern is `mayaku-<size>-<task>`. To see what is currently hosted:
+The pattern is `mayaku-<size>-<task>`. They know Objects365's 365 classes, and fine-tuning replaces those with yours (see [Training](/docs/data-and-training/training.md)). On the 100 datasets of RF100-VL, fine-tuned `mayaku-n-det` averages 58.9 AP (see [the benchmark](/docs/index.md#fine-tuning-benchmark-rf100-vl)).
 
-```bash
-mayaku download --list
-```
+No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md#train), [classification](/docs/more-tasks/classification.md#train).
 
-No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/mayaku/more-tasks/keypoints/), [oriented boxes](/mayaku/more-tasks/oriented-boxes/#train), [classification](/mayaku/more-tasks/classification/#train).
+## Ready-to-use models
+
+A ready-to-use model's name is a base model's name plus what it is made for.
+
+| Made for | Models | Details |
+|---|---|---|
+| Road and street scenes, dashcam to aerial, 22 classes | `mayaku-n-det-street`, `mayaku-n-seg-street`, `mayaku-m-det-street`, `mayaku-m-seg-street` | [Street models](/docs/ready-to-use/street.md) |
+
+### Street models
+
+Their classes, accuracy, speed and limitations are on the [Street models](/docs/ready-to-use/street.md) page.
 
 ## Sizes
 
@@ -48,7 +74,7 @@ The architecture:
 - A convolutional backbone, a three-level feature pyramid at strides 8, 16 and 32, and an anchor-free detection head that predicts each box side as a distribution (DFL).
 - Masks, keypoints and oriented boxes are extra branches on the same detector.
 - Overlapping detections are removed by NMS in post-processing, not inside the network.
-- The deployed network uses only 1×1 and 3×3 convolutions, ReLU, addition, nearest upsampling and max-pooling (see [Export](/mayaku/deployment/export/#the-exported-graph)).
+- The deployed network uses only 1×1 and 3×3 convolutions, ReLU, addition, nearest upsampling and max-pooling (see [Export](/docs/deployment/export.md#the-exported-graph)).
 
 ## Downloads
 

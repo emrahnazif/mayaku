@@ -1,9 +1,10 @@
----
-title: Train an image classifier
+# Train an image classifier
+
+<!--
 summary: Train an image classifier from one folder per class, then predict and score top-1 and top-5 accuracy.
 label: Classification
 keywords: mayaku, image classification, class folders, top-1 accuracy
----
+-->
 
 A classification model assigns one class to a whole image and returns a probability for every class. In Mayaku it is the detector's backbone with a classification head (`model.task: classify`). It is trained, predicted, evaluated and exported with the same functions and commands as the detectors.
 
@@ -21,7 +22,7 @@ data/
     └── dog/
 ```
 
-Class names are the folder names, in sorted order. See [Datasets](/mayaku/data-and-training/datasets/#class-folders) for the file types and rules.
+Class names are the folder names, in sorted order. See [Datasets](/docs/data-and-training/datasets.md#class-folders) for the file types and rules.
 
 ## Train
 
@@ -109,4 +110,4 @@ The image is letterboxed onto the canvas: resized to fit while keeping its aspec
 
 ## Export
 
-Classifiers export to every target. See [Export and deployment](/mayaku/deployment/export/). An exported classifier runs with `from_pretrained("model.onnx")` and returns the same `Classification`.
+Classifiers export to every target. See [Export and deployment](/docs/deployment/export.md). An exported classifier runs with `from_pretrained("model.onnx")` and returns the same `Classification`.

@@ -1,9 +1,10 @@
----
-title: Install Mayaku
+# Install Mayaku
+
+<!--
 summary: Install Mayaku with pip, add the optional export packages, and choose the device it runs on.
 label: Installation
 keywords: mayaku, install, pip, pytorch, cuda, apple silicon
----
+-->
 
 ## Requirements
 
@@ -37,12 +38,12 @@ On Apple Silicon the default macOS wheels already include MPS support.
 
 | Target | Installed on first use | Notes |
 |---|---|---|
-| ONNX | `onnxruntime-gpu` matching your torch's CUDA build with an NVIDIA GPU, else `onnxruntime` | Export runs the file once to check it, so exporting needs it too. |
+| ONNX | `onnxruntime-gpu[cuda,cudnn]` matching your torch's CUDA build with an NVIDIA GPU, else `onnxruntime` | Export runs the file once to check it, so exporting needs it too. The extras bring the CUDA libraries torch does not install. |
 | Core ML | `coremltools` | The `.mlpackage` can be written on any OS, but it is only checked and run on macOS. |
 | OpenVINO | `openvino` | Intel CPUs, integrated GPUs and NPUs. |
 | TensorRT | `tensorrt-cu12` (or `-cu13`) 10.x, matching your torch's CUDA build | Linux with an NVIDIA GPU. A TensorRT 11 you installed yourself is used as is; it needs `nvidia-modelopt[onnx]` (torch 2.8 or newer). |
 
-Your installed `torch` and `torchvision` are pinned during every such install, so they are never replaced. On an older NVIDIA driver, install the torch build that matches it first (from [pytorch.org](https://pytorch.org/get-started/locally/)); mayaku then picks TensorRT to match.
+The install uses pip, or `uv pip` in an environment made by `uv venv`, which has no pip. Your installed `torch` and `torchvision` are pinned during every such install, so they are never replaced. On an older NVIDIA driver, install the torch build that matches it first (from [pytorch.org](https://pytorch.org/get-started/locally/)); mayaku then picks TensorRT to match.
 
 To install runtimes yourself (offline machines, locked environments), set `MAYAKU_AUTOINSTALL=0`. A missing runtime then fails with the exact `pip install` command.
 
@@ -70,7 +71,7 @@ Every command and function that runs a model takes a `device` argument (`--devic
 | `mps` | Apple Silicon GPU. |
 | `cpu` | CPU only. |
 
-Training on more than one GPU is covered in [Training](/mayaku/data-and-training/training/#multiple-gpus). It needs CUDA. MPS supports a single device only.
+Training on more than one GPU is covered in [Training](/docs/data-and-training/training.md#multiple-gpus). It needs CUDA. MPS supports a single device only.
 
 On Apple Silicon, Mayaku sets the environment variable `PYTORCH_ENABLE_MPS_FALLBACK=1` when it is imported. Any PyTorch operation without an MPS kernel then runs on the CPU instead of raising an error. If you set the variable yourself before importing Mayaku, including to `0`, your value is kept.
 

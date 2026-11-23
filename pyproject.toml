@@ -10,8 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-    {name = "Emrah Nazif", email = "emrah@datamarkin.com"},
-    {name = "Datamarkin", email = "support@datamarkin.com"}
+    {name = "Emrah Nazif", email = "emrah@datamarkin.com"}
 ]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
@@ -75,7 +74,20 @@ Homepage = "https://github.com/datamarkin/mayaku"
 path = "src/mayaku/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mayaku"]
+# docs/ stays at the repository root (the website copies it from there) and
+# ships as mayaku/docs/, pages only, so coding agents read the docs of the
+# installed version offline.
+only-include = ["src/mayaku", "docs"]
+exclude = ["docs/assets"]
+
+[tool.hatch.build.targets.sdist]
+# The README's images and animation are served from GitHub, and hf/ holds the
+# Hugging Face model cards: neither is needed to build the package.
+exclude = ["docs/assets", "hf"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"docs" = "mayaku/docs"
 
 [tool.ruff]
 line-length = 100

@@ -46,10 +46,16 @@ from mayaku.engine.distributed import (
     local_device,
     resolve_ddp_device,
 )
-from mayaku.engine.evaluation import evaluate_runner, evaluate_runner_classifier, summary
+from mayaku.engine.evaluation import (
+    OPERATING_MIN_GT,
+    evaluate_runner,
+    evaluate_runner_classifier,
+    summary,
+)
 from mayaku.engine.trainer import load_state
 from mayaku.engine.trainer import train as run
 from mayaku.inference import from_pretrained
+from mayaku.inference.decode import PREDICT
 from mayaku.model import load_pretrained
 from mayaku.model.blocks import rescale_to_init
 from mayaku.model.classify import load_backbone
@@ -60,11 +66,12 @@ from mayaku.utils.checkpoint import (
     git_hash,
     read_deploy_checkpoint,
     select_final_weights,
+    set_predict_conf,
     sidecar_config,
 )
 from mayaku.utils.download import resolve_weights
 
-__all__ = ["evaluate", "train"]
+__all__ = ["evaluate", "train", "tune_predict"]
 
 # a classifier's default canvas side (the ImageNet convention)
 CLASSIFY_SIZE = 224
@@ -235,10 +242,15 @@ def train(
     metrics, eval_seconds = None, None
     if val:
         t0 = time.time()
+        # the prediction threshold comes from the same pass while the
+        # config leaves `train.predict.conf` at its default
+        tune = cfg.model.task != "classify" and cfg.train.predict.conf == PREDICT.conf
         metrics = evaluate(final_weights, annotations=val[0], images=val[1],
-                           output_dir=run_dir / "eval", device=device)
+                           output_dir=run_dir / "eval", device=device, operating=tune)
         eval_seconds = time.time() - t0
         log(f"[mayaku.train] {summary(metrics)}")
+        if tune:
+            _record_predict_conf(final_weights, metrics, log)
 
     cuda = device.startswith("cuda")
     metadata = {
@@ -281,6 +293,7 @@ def evaluate(
     output_dir: str | Path | None = None,
     device: str = "auto",
     log: Callable[[str], None] = print,
+    operating: bool = False,
 ) -> dict[str, Any]:
     """COCO metrics of a trained model on a split, measured the way it
     deploys: ``weights`` is anything `mayaku.from_pretrained` loads -- a
@@ -289,7 +302,10 @@ def evaluate(
     with ``segm_*`` and ``kpt_*`` for models with those heads), also written
     to ``<output_dir>/metrics.json`` when ``output_dir`` is set. A
     classifier is scored on class folders (``images`` alone, no
-    ``annotations``): ``top1`` and ``top5``."""
+    ``annotations``): ``top1`` and ``top5``. ``operating`` adds the
+    prediction score threshold this split supports (``predict_conf`` with
+    its ``predict_precision``, ``predict_recall`` and ``predict_f1``; see
+    `mayaku.engine.evaluation.operating_point`)."""
     runner = from_pretrained(weights, device=device)
     metrics: dict[str, Any]
     if runner.sidecar.get("task") == "classify":
@@ -301,11 +317,49 @@ def evaluate(
             raise ValueError("annotations (a COCO JSON) are required to score a detector")
         annotations, images = Path(annotations), Path(images)
         _check_split(annotations, images)
-        metrics = evaluate_runner(runner, images, annotations, log=log)
+        metrics = evaluate_runner(runner, images, annotations, log=log, operating=operating)
     if output_dir is not None:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         (Path(output_dir) / "metrics.json").write_text(json.dumps(metrics, indent=2))
     return metrics
+
+
+def tune_predict(
+    weights: str | Path,
+    *,
+    annotations: str | Path,
+    images: str | Path,
+    output: str | Path | None = None,
+    device: str = "auto",
+    log: Callable[[str], None] = print,
+) -> dict[str, Any]:
+    """Choose a checkpoint's prediction score threshold on a validation split
+    and record it in the checkpoint (in place, or written to ``output``):
+    the step training runs at its end, for a checkpoint trained without it
+    or a different split. Returns the metrics, with ``predict_conf`` when the
+    split was large enough to choose from."""
+    path = resolve_weights(weights)
+    if path.suffix not in (".pt", ".pth"):
+        raise ValueError(f"{path}: a checkpoint (.pt / .pth) records the threshold; export after tuning")
+    metrics = evaluate(path, annotations=annotations, images=images, device=device, log=log,
+                       operating=True)
+    _record_predict_conf(path, metrics, log, output)
+    return metrics
+
+
+def _record_predict_conf(path: Path, metrics: Mapping[str, Any], log: Callable[[str], None],
+                         out: str | Path | None = None) -> None:
+    """Write the metrics' ``predict_conf`` into the checkpoint, or say why not."""
+    if "predict_conf" not in metrics:
+        log(f"[mayaku.train] prediction threshold kept at {PREDICT.conf:g}: fewer than "
+            f"{OPERATING_MIN_GT} validation objects to choose from")
+        return
+    note = {k: metrics[k] for k in ("predict_precision", "predict_recall", "predict_f1")}
+    dest = set_predict_conf(path, metrics["predict_conf"], out,
+                            {**note, "rule": "best F1 on the validation split"})
+    log(f"[mayaku.train] prediction threshold {metrics['predict_conf']:g} (precision "
+        f"{note['predict_precision']:.3f}, recall {note['predict_recall']:.3f}, F1 "
+        f"{note['predict_f1']:.3f} on the validation split) -> {dest}")
 
 
 def _resolve_model(

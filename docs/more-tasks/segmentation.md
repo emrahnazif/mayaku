@@ -1,11 +1,12 @@
----
-title: Train an instance segmentation model
+# Train an instance segmentation model
+
+<!--
 summary: Train a model that returns a pixel mask per object, and read its masks and mask metrics.
 label: Segmentation
 keywords: mayaku, instance segmentation, masks, coco, rle
----
+-->
 
-An instance segmentation model detects each object, giving a box, class and score, and also returns a pixel mask for it. In Mayaku it is a detector with a mask branch turned on (`model.seg: true`). Everything in [Training](/mayaku/data-and-training/training/) applies.
+An instance segmentation model detects each object, giving a box, class and score, and also returns a pixel mask for it. In Mayaku it is a detector with a mask branch turned on (`model.seg: true`). Everything in [Training](/docs/data-and-training/training.md) applies.
 
 ## Data
 
@@ -16,7 +17,7 @@ COCO JSON whose annotations have a `segmentation` field, either polygons or RLE:
  "segmentation": [[100, 120, 150, 120, 150, 200, 100, 200]]}
 ```
 
-See [Datasets](/mayaku/data-and-training/datasets/#instance-segmentation-masks) for the details.
+See [Datasets](/docs/data-and-training/datasets.md#instance-segmentation-masks) for the details.
 
 ## Train
 
@@ -63,7 +64,7 @@ From scratch, with no weights: `--set model.seg=true`.
 
 ## Validation and metrics
 
-Training scores both boxes and masks. The final `metrics` dict and `eval/metrics.json` hold the box metrics (`AP`, `AP50`, ...) and the mask metrics with a `segm_` prefix (`segm_AP`, `segm_AP50`, `segm_AP75`, `segm_AP-S`, `segm_AP-M`, `segm_AP-L`, `segm_AR1`, ...). See [Evaluation](/mayaku/deployment/evaluation/).
+Training scores both boxes and masks. The final `metrics` dict and `eval/metrics.json` hold the box metrics (`AP`, `AP50`, ...) and the mask metrics with a `segm_` prefix (`segm_AP`, `segm_AP50`, `segm_AP75`, `segm_AP-S`, `segm_AP-M`, `segm_AP-L`, `segm_AR1`, ...). See [Evaluation](/docs/deployment/evaluation.md).
 
 `best.pt` is chosen by **mask** AP (`segm_AP`), which each epoch's log line shows after the box metrics. Validation annotations without masks fall back to box AP. With QAT, an epoch counts as the lower of its fp32 and int8 mask AP.
 
@@ -81,7 +82,7 @@ det.masks[0].sum() # pixel area of the first object's mask
 
 - `det.masks[i]` belongs to `det.boxes[i]`, `det.scores[i]` and `det.labels[i]`.
 - Masks have the original image's height and width, not the canvas size.
-- Full-resolution masks of many detections use a lot of memory on large images. Raise the score threshold to keep fewer, for example `predictor("photo.jpg", conf=0.25)`.
+- Full-resolution masks of many detections use a lot of memory on large images. Raise the score threshold to keep fewer, for example `predictor("photo.jpg", conf=0.5)`.
 
 Save a mask as an image:
 
@@ -115,4 +116,4 @@ binary = mask_utils.decode(detection["segmentation"])   # uint8 array (height, w
 
 ## Export
 
-Segmentation models export to every target like a detector. See [Export and deployment](/mayaku/deployment/export/). The exported graph outputs the mask features, and Mayaku's host-side decode assembles each object's mask. Running the artifact with `from_pretrained("model.onnx")` returns the same `masks`.
+Segmentation models export to every target like a detector. See [Export and deployment](/docs/deployment/export.md). The exported graph outputs the mask features, and Mayaku's host-side decode assembles each object's mask. Running the artifact with `from_pretrained("model.onnx")` returns the same `masks`.

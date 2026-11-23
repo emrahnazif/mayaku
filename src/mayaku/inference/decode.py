@@ -25,8 +25,8 @@ from mayaku.model.blocks import STRIDES
 from mayaku.model.box import anchor_grid, decode_boxes, flatten_head
 from mayaku.model.detector import split_outputs
 
-__all__ = ["DEPLOY", "Classification", "Decode", "Detections", "decode", "decode_sidecar",
-           "postprocess"]
+__all__ = ["DEPLOY", "PREDICT", "Classification", "Decode", "Detections", "PredictDecode", "decode",
+           "decode_sidecar", "host_side", "postprocess", "predict_decode"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,13 +48,45 @@ class Decode:
     multi_label: bool = True
 
     @classmethod
-    def from_sidecar(cls, block, **override):
-        """From a sidecar's "decode" block (which also carries strides and
-        reg_max); `override` replaces fields, e.g. conf."""
-        return cls(**{f.name: block[f.name] for f in dataclasses.fields(cls)} | override)
+    def from_sidecar(cls, block):
+        """From a sidecar's "decode" or "predict" block (the former also
+        carries strides and reg_max)."""
+        return cls(**{f.name: block[f.name] for f in dataclasses.fields(cls)})
 
 
 DEPLOY = Decode()
+
+# A prediction decodes with the checkpoint's "predict" block, evaluation
+# with its "decode" block (`DEPLOY`, for COCO AP). NMS 0.5 removes 94% of
+# the second boxes on one object on the street nano's val, at -0.5 AP if
+# evaluation used it, so evaluation keeps 0.7.
+@dataclasses.dataclass(frozen=True)
+class PredictDecode(Decode):
+    """`Decode` with the prediction defaults, so a config that sets only some
+    of `train.predict` keeps these for the rest."""
+
+    conf: float = 0.4
+    iou: float = 0.5
+    multi_label: bool = False
+
+
+PREDICT = PredictDecode()
+
+
+def predict_decode(sidecar) -> Decode:
+    """The `Decode` a prediction uses: the sidecar's "predict" block, or
+    `PREDICT` for a checkpoint written before it existed."""
+    return PredictDecode.from_sidecar(sidecar["predict"]) if sidecar.get("predict") else PREDICT
+
+
+def host_side(preds: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Where the decode runs: on the GPU for CUDA, else on the CPU. The
+    decode is many small ops with host syncs between them (thresholds,
+    top-k, NMS, per-chunk mask sizes), which CUDA runs well and MPS does
+    not: on an M1 Max, decoding a 1080p frame of an 800-canvas seg model
+    takes 107 ms on MPS and 8.5 ms on the CPU, with identical results."""
+    return [p if p.is_cuda else p.cpu() for p in preds]
+
 
 # Most mask elements one chunk of `masklib.box_masks` computes at once (a
 # float each, 512 MB): masks are computed inside their boxes, but a chunk
@@ -157,10 +189,11 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=No
     images; everything returned is mapped back to those original frames.
     Masks are computed only inside the rectangle each can be set in
     (`mayaku.model.mask.box_masks`). `encode_mask`, given, turns each chunk
-    of them -- `encode_mask(masks, rects, shapes)`, still on the device --
-    into a list of what `masks` holds (the evaluator's RLE, `rle_crops`), so
-    full-frame masks never exist or cross to the host.
+    of them -- `encode_mask(masks, rects, shapes)`, on the device the decode
+    runs on (`host_side`) -- into a list of what `masks` holds (the
+    evaluator's RLE, `rle_crops`), so full-frame masks never exist.
     """
+    preds = host_side(preds)
     grp = split_outputs(preds, seg=seg, kpt=kpt, obb=obb)
     dets, idxs, points, stride = postprocess(preds, nc, reg_max, d, grp.get("ang"))
     # flatten the aux maps once for the whole batch, not per image
@@ -228,11 +261,12 @@ def _decode_masks(grp, dets, idxs, points, stride, kflat, ms, metas, encode_mask
     return [flat[base[b]:base[b + 1]] for b in range(len(dets))] if encode_mask else out
 
 
-def decode_sidecar(preds, metas, sidecar, conf=None,
-                   encode_mask=None) -> list[Detections] | list[Classification]:
+def decode_sidecar(preds, metas, sidecar, conf=None, encode_mask=None,
+                   mode="eval") -> list[Detections] | list[Classification]:
     """`decode` with every parameter read from a model's sidecar (see
-    `mayaku.utils.checkpoint.build_sidecar`); `conf` overrides the recorded
-    score threshold, `encode_mask` is `decode`'s. A classifier's sidecar (`task: classify`) gives one
+    `mayaku.utils.checkpoint.build_sidecar`): its "decode" block for `mode`
+    "eval", its "predict" block (`predict_decode`) for "predict"; `conf`
+    replaces the score threshold, `encode_mask` is `decode`'s. A classifier's sidecar (`task: classify`) gives one
     `Classification` per image instead: the softmax of the class map's
     spatial mean."""
     if sidecar.get("task") == "classify":
@@ -240,7 +274,9 @@ def decode_sidecar(preds, metas, sidecar, conf=None,
 
         return [Classification(p) for p in logits(preds).softmax(1).cpu()]
     dec = sidecar["decode"]
-    d = Decode.from_sidecar(dec, **({} if conf is None else {"conf": conf}))
+    d = predict_decode(sidecar) if mode == "predict" else Decode.from_sidecar(dec)
+    if conf is not None:
+        d = dataclasses.replace(d, conf=conf)
     kp = sidecar["keypoints"]
     return decode(preds, metas, len(sidecar["class_names"]), dec["reg_max"],
                   seg=sidecar["mask"] is not None, kpt=kp["num"] if kp else 0, d=d,

@@ -8,6 +8,8 @@ before it is returned. The targets built from ONNX check the five-op
 contract on it; Core ML traces the same module.
 
 A target module provides `PRECISIONS` (the first is the default),
+`REGRID_INT8` (whether int8 gives one-sided ranges the whole grid, which
+needs a zero point; `mayaku.model.quant.ActFakeQuant.export_qparams`),
 `write(model, path, canvas, precision, sidecar)`, `runnable()` (whether its
 runtime works on this host) and `Session(path, outputs, precision, device)`.
 
@@ -18,9 +20,10 @@ runtime works on this host) and `Session(path, outputs, precision, device)`.
 | openvino | `.xml`       | fp32, fp16, int8             | OpenVINO         |
 | tensorrt | `.engine`    | fp16, fp32                   | TensorRT (CUDA)  |
 
-int8 needs a quantization-aware model and is exactly the network it was
-trained as: every conv's input quantized with its observed range, weights per
-channel. The host decode is the same for every artifact
+int8 needs a quantization-aware model and is the network it was trained as:
+every conv's input quantized with its observed range, weights per channel;
+ONNX and OpenVINO give ranges that are never negative the whole int8 grid
+over the same range (`REGRID_INT8`). The host decode is the same for every artifact
 (`mayaku.inference.decode`).
 """
 
@@ -55,6 +58,11 @@ class Target:
         """What it exports; the first is the default."""
         return tuple(self.module.PRECISIONS)
 
+    @property
+    def regrid_int8(self) -> bool:
+        """Whether its int8 gives one-sided ranges the whole grid."""
+        return bool(self.module.REGRID_INT8)
+
 
 TARGETS = {t: Target(s, importlib.import_module(f"mayaku.inference.export.{t}"))
            for s, t in SUFFIX_TO_TARGET.items()}
@@ -66,10 +74,11 @@ TARGETS = {t: Target(s, importlib.import_module(f"mayaku.inference.export.{t}"))
 # and the flips compound over the stack, so the trained simulation itself run
 # in float64 instead of float32 moves by about 3% (tier n); no int8 runtime
 # can match it closer than that. The parity input is uniform noise, harsher on
-# int8 than any image: a TensorRT 11 engine of COCO nano (fp16 graph around
-# the Q/DQ pairs) sits at 10.8% there, and 0.26 AP from its fp16 engine on
-# COCO val.
-_TOLERANCE = {"fp32": 1e-3, "fp16": 1e-2, "int8": 1.5e-1}
+# int8 than any image: exports of trained models sit between 10% and 17% there
+# (the street nano: ONNX Runtime 14.4-15.4%, OpenVINO 13.3-13.6% over three
+# seeds, 43.9 AP against 44.2 fp32 on its val). A broken conversion is off by
+# about 100%.
+_TOLERANCE = {"fp32": 1e-3, "fp16": 1e-2, "int8": 2e-1}
 
 # Where each target's parity runs: the compute it deploys on. Core ML pinned to
 # its CPU runs fp16 with fp16 accumulation, its least accurate path (several
@@ -81,8 +90,9 @@ _PARITY_DEVICE = {"coreml": "auto"}
 def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str | Path,
            precision: str | None = None) -> Path:
     """Write `model` (a trained `Detector`, left untouched) as a `target`
-    artifact at `path` with `sidecar` embedded; `precision` defaults to the
-    target's first. Raises if the artifact's raw maps disagree with the Torch
+    artifact at `path` with `sidecar` embedded (the target's extension is
+    added when `path` has none); `precision` defaults to the target's first;
+    returns the path written. Raises if the artifact's raw maps disagree with the Torch
     model's. Parity is skipped, with the artifact still written, only where
     its runtime cannot run on this host (Core ML off macOS)."""
     if target not in TARGETS:
@@ -93,7 +103,7 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
         raise ValueError(f"{target} exports {', '.join(t.precisions)}, not {precision}")
     if precision == "int8" and not sidecar["quant"]["qat"]:
         raise ValueError("int8 needs a quantization-aware model (train it with model.qat)")
-    path, canvas = Path(path), tuple(sidecar["canvas_hw"])
+    path, canvas = _with_suffix(Path(path), target), tuple(sidecar["canvas_hw"])
     m = model.for_deploy().cpu()
     sidecar = {**sidecar, "export": {"target": target, "precision": precision}}
     if target != "tensorrt" or torch.cuda.is_available():   # else `write` explains
@@ -106,6 +116,19 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
         raise RuntimeError(f"{path}: {target} {precision} outputs differ from the Torch model "
                            f"by {err:.2%} RMS (tolerance {_TOLERANCE[precision]:.1%})")
     return path
+
+
+def _with_suffix(path: Path, target: str) -> Path:
+    """`path` with the target's extension added when it has none of its own,
+    so the artifact can be loaded back by its suffix; another target's
+    extension is a mistake and raises."""
+    other = SUFFIX_TO_TARGET.get(path.suffix.lower())
+    if other == target:
+        return path
+    if other:
+        raise ValueError(f"{path}: a {target} export is written as {TARGETS[target].suffix}, "
+                         f"not {path.suffix} (the {other} extension)")
+    return path.with_name(path.name + TARGETS[target].suffix)
 
 
 class Session(Protocol):
@@ -145,7 +168,7 @@ def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 
     session = open_session(path, sidecar, _PARITY_DEVICE.get(target, "cpu"))
     px = torch.randint(0, 256, (1, *sidecar["canvas_hw"], 3), dtype=torch.uint8,
                        generator=torch.Generator().manual_seed(seed)).numpy()
-    with deploy_mode(model, sidecar["export"]["precision"] == "int8"):
+    with deploy_mode(model, sidecar["export"]["precision"] == "int8", TARGETS[target].regrid_int8):
         ref = model.eval()(network_input(px, torch.device("cpu")))
     got = session(px)
     err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())

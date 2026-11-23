@@ -1,11 +1,12 @@
----
-title: Train an oriented bounding box model
+# Train an oriented bounding box model
+
+<!--
 summary: Train a model that detects rotated boxes from polygon annotations, and read its angles and corners.
 label: Oriented boxes
 keywords: mayaku, oriented bounding boxes, obb, rotated boxes, aerial images
----
+-->
 
-An oriented-box model detects each object as a **rotated** rectangle: center, width, height and angle. This fits objects that are not axis-aligned, such as ships and vehicles in aerial images, text lines, or parts on a conveyor. In Mayaku it is a detector with an angle output turned on (`model.obb: true`). Everything in [Training](/mayaku/data-and-training/training/) applies.
+An oriented-box model detects each object as a **rotated** rectangle: center, width, height and angle. This fits objects that are not axis-aligned, such as ships and vehicles in aerial images, text lines, or parts on a conveyor. In Mayaku it is a detector with an angle output turned on (`model.obb: true`). Everything in [Training](/docs/data-and-training/training.md) applies.
 
 Oriented boxes are a task of their own. They can't be combined with masks (`model.seg`) or keypoints (`model.keypoints`) in one model.
 
@@ -53,7 +54,7 @@ For aerial and other top-down images, vertical flips are usually a free gain: `-
 
 ## Validation and metrics
 
-The metric keys are the detection keys (`AP`, `AP50`, `AP75`, `AP-S`, ..., see [Evaluation](/mayaku/deployment/evaluation/)), but overlap is measured between **rotated** boxes. Each ground-truth box is the rotated rectangle derived from its polygon, and it is matched to predictions by exact polygon IoU.
+The metric keys are the detection keys (`AP`, `AP50`, `AP75`, `AP-S`, ..., see [Evaluation](/docs/deployment/evaluation.md)), but overlap is measured between **rotated** boxes. Each ground-truth box is the rotated rectangle derived from its polygon, and it is matched to predictions by exact polygon IoU.
 
 ## Predict
 
@@ -99,4 +100,4 @@ cv2.imwrite("aerial_obb.jpg", img)
 
 ## Export
 
-Oriented-box models export to every target like a detector. See [Export and deployment](/mayaku/deployment/export/). The rotated NMS runs in Mayaku's host-side decode, so `from_pretrained("model.onnx")` returns the same `rboxes`.
+Oriented-box models export to every target like a detector. See [Export and deployment](/docs/deployment/export.md). The rotated NMS runs in Mayaku's host-side decode, so `from_pretrained("model.onnx")` returns the same `rboxes`.

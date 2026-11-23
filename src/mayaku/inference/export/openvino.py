@@ -20,6 +20,7 @@ from mayaku.inference.preprocess import Canvases, planar
 from mayaku.model import Detector
 
 PRECISIONS = ("fp32", "fp16", "int8")
+REGRID_INT8 = True    # one-sided int8 ranges get the whole grid (`mayaku.model.quant`)
 
 
 def runnable() -> bool:
@@ -30,7 +31,7 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
           sidecar: Mapping[str, Any]) -> None:
     import openvino as ov
 
-    with onnx_graph(model, canvas, int8=precision == "int8") as onnx:
+    with onnx_graph(model, canvas, int8=precision == "int8", regrid=REGRID_INT8) as onnx:
         ir = ov.convert_model(str(onnx))
     ir.set_rt_info(sidecar_blob(dict(sidecar)), [SIDECAR_KEY])
     ov.save_model(ir, str(path), compress_to_fp16=precision == "fp16")
