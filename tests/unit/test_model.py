@@ -1,0 +1,239 @@
+"""The v3 detector: fusion is exact, the deploy graph stays inside the five-op
+contract, the output layout is stable, and the aux branch is detachable."""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+
+import pytest
+import torch
+
+from mayaku.model import (
+    STRIDES,
+    TIERS,
+    TINY,
+    Detector,
+    check_parity,
+    enable_qat,
+    load_pretrained,
+    load_weights,
+)
+from mayaku.model.blocks import SPPFAdd, as_canvas, conv_bn_pairs, rescale_to_init
+from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx, randomize_bn
+from mayaku.model.quant import qdq_export
+
+onnx = pytest.importorskip("onnx")
+
+SEG_KPT = dataclasses.replace(TINY, seg=True, kpt=3)
+# every backbone-layout field away from its default, with the stride-4 mask
+# feature reading the stride-4 stage
+LAYOUT = dataclasses.replace(TINY, stem=16, stem_mid=8, s4_depth=1, expansion=2,
+                             global_ctx=True, seg=True, mask_stride=4)
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [TINY, SEG_KPT, dataclasses.replace(SEG_KPT, aux_arm="tower"), LAYOUT],
+    ids=["tiny", "tiny-seg-kpt", "tiny-seg-kpt-tower", "tiny-layout"],
+)
+def test_fuse_parity_and_contract(cfg) -> None:
+    err, scale, inv = check_parity(Detector(cfg, 4), 128)
+    assert err < 1e-4 * max(scale, 1.0)
+    assert set(inv) <= DEPLOY_OPS
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("tier", sorted(TIERS))
+def test_tier_fuse_parity_and_contract(tier: str) -> None:
+    # with masks and keypoints: that graph contains the detection graph
+    cfg = dataclasses.replace(TIERS[tier], seg=True, kpt=17)
+    err, scale, inv = check_parity(Detector(cfg, 80), 256)
+    assert err < 1e-4 * max(scale, 1.0)
+    assert set(inv) <= DEPLOY_OPS
+
+
+def test_deploy_parameter_counts() -> None:
+    """The locked range: deploy (fused) parameters per tier."""
+    want = {"n": 5.18, "s": 13.88, "m": 32.40, "l": 57.91}
+    for tier, millions in want.items():
+        m = Detector(TIERS[tier], 80).fuse()
+        params = sum(p.numel() for p in m.parameters())
+        assert abs(params / 1e6 - millions) < 0.01, (tier, params)
+
+
+def test_output_layout() -> None:
+    m = Detector(SEG_KPT, 4).eval()
+    with torch.no_grad():
+        out = m(torch.zeros(1, 3, 128, 96))
+    assert len(out) == len(m.out_names) == 6 + 4 + 4
+    g = m.split(out)
+    assert len(g["head"]) == 6 and len(g["ker"]) == 3 and len(g["kpt"]) == 3
+    assert g["mask"].shape == (1, 8, 16, 12)
+    assert g["heat"].shape == (1, 3 + 2, 16, 12)
+    for i, s in enumerate(STRIDES):
+        assert g["head"][2 * i].shape == (1, 4, 128 // s, 96 // s)
+
+
+@pytest.mark.parametrize("canvas", [128, (96, 160), (160, 96)])
+def test_fused_export_in_contract(tmp_path, canvas) -> None:
+    m = Detector(TINY, 4).fuse()
+    params, flops = count(m, canvas)
+    assert params > 0 and flops > 0
+    inv = export_onnx(m, str(tmp_path / "tiny.onnx"), canvas)
+    assert set(inv) <= DEPLOY_OPS
+    dims = onnx.load(str(tmp_path / "tiny.onnx")).graph.input[0].type.tensor_type.shape.dim
+    assert [d.dim_value for d in dims] == [1, 3, *as_canvas(canvas)]
+
+
+def test_fuse_parity_on_a_rectangular_canvas() -> None:
+    err, scale, inv = check_parity(Detector(SEG_KPT, 4), (96, 160))
+    assert err < 1e-4 * max(scale, 1.0) and set(inv) <= DEPLOY_OPS
+
+
+def test_canvas_must_divide_by_the_coarsest_stride() -> None:
+    for bad in (100, (96, 100), (0, 32)):
+        with pytest.raises(AssertionError, match="multiples of 32"):
+            as_canvas(bad)
+    assert as_canvas(64) == (64, 64) and as_canvas((96, 160)) == (96, 160)
+
+
+def test_object_prior_follows_the_canvas() -> None:
+    """A canvas with the same cell count gives the same prior, whatever its shape."""
+    square = Detector(TINY, 4, 640).head.cls[0].bias
+    rect = Detector(TINY, 4, (320, 1280)).head.cls[0].bias
+    assert torch.equal(square, rect)
+    assert (Detector(TINY, 4, 320).head.cls[0].bias > square).all()
+
+
+def test_qat_export_stays_in_contract(tmp_path) -> None:
+    m = enable_qat(Detector(TINY, 4))
+    m.train()
+    with torch.no_grad():
+        m(torch.randn(2, 3, 64, 64))   # observers see a range
+    m.fuse()
+    inv = export_onnx(m, str(tmp_path / "qat.onnx"), 64)
+    assert set(inv) <= DEPLOY_OPS
+
+
+def _calibrated_qat():
+    m = enable_qat(Detector(SEG_KPT, 4))
+    m.train()
+    with torch.no_grad():
+        m(torch.rand(2, 3, 64, 64))    # observers see a range
+    return m.eval()
+
+
+def test_qat_ranges_survive_fusion() -> None:
+    """Every deployed conv keeps an int8 input range, the fused RepVGG kernels
+    included (they read the same input their branches did)."""
+    m = _calibrated_qat().fuse()
+    assert not [n for n, c in m.named_modules() if type(c) is torch.nn.Conv2d]
+
+
+def test_int8_graph_is_the_training_simulation(tmp_path) -> None:
+    """The QDQ graph computes exactly what fake-quant trained, and exports as
+    the contract plus Q/DQ pairs, also with one-sided ranges regridded (zero
+    point -128); a model without QAT has no int8 graph."""
+    m = _calibrated_qat().fuse()
+    x = torch.rand(1, 3, 64, 64)
+    with torch.no_grad():
+        sim = m(x)
+        with qdq_export(m):
+            qdq = m(x)
+    assert all(torch.equal(a, b) for a, b in zip(sim, qdq, strict=True))
+    with qdq_export(m, regrid=True):
+        assert any(c.qdq[1] == -128 for c in m.modules() if getattr(c, "qdq", None))
+    for regrid in (False, True):
+        inv = export_onnx(m, str(tmp_path / f"int8_{regrid}.onnx"), 64, int8=True, regrid=regrid)
+        assert set(inv) <= DEPLOY_OPS | QDQ_OPS and inv["QuantizeLinear"] > 0
+    with pytest.raises(ValueError, match="quantization-aware"):
+        export_onnx(Detector(TINY, 4).fuse(), str(tmp_path / "x.onnx"), 64, int8=True)
+
+
+def test_load_weights_across_the_aux_boundary() -> None:
+    plain, with_aux = Detector(TINY, 4), Detector(SEG_KPT, 4)
+    r = load_weights(plain, with_aux.state_dict())
+    assert r["unexpected"] and all(k.startswith("aux.") for k in r["unexpected"])
+    r = load_weights(with_aux, plain.state_dict())
+    assert r["missing"] and all(k.startswith("aux.") for k in r["missing"])
+    with pytest.raises(AssertionError):
+        load_weights(plain, with_aux.state_dict(), strict_aux=True)
+    other = Detector(dataclasses.replace(TINY, neck=(16, 16, 32)), 4)
+    with pytest.raises(AssertionError, match="does not fit"):
+        load_weights(plain, other.state_dict())
+
+
+def test_load_pretrained_reinitialises_only_the_classifier() -> None:
+    base = enable_qat(Detector(SEG_KPT, 80))                 # e.g. a QAT base with aux heads
+    target = Detector(TINY, 3)                               # fp32, 3 classes, no aux
+    report = load_pretrained(target, base.state_dict())
+    assert report["reinitialised"] and all(k.startswith("head.cls.") for k in report["reinitialised"])
+    assert all(k.startswith("aux.") or ".act_fq." in k for k in report["unexpected"])
+    assert torch.equal(target.head.box[0].weight, base.head.box[0].weight)
+    with pytest.raises(AssertionError, match="does not fit"):
+        load_pretrained(Detector(dataclasses.replace(TINY, neck=(16, 16, 32)), 3), base.state_dict())
+
+
+def test_global_context_starts_as_the_plain_pyramid_and_sees_the_whole_map() -> None:
+    """Loaded from a plain SPPF, the global-context variant computes the same
+    function (its last projection starts at zero); trained away from zero,
+    one corner of the map moves the opposite corner, which the 13-wide plain
+    pyramid cannot reach on a 32 x 32 map."""
+    torch.manual_seed(0)
+    plain, ctx = SPPFAdd(16).eval(), SPPFAdd(16, global_ctx=True).eval()
+    assert ctx.load_state_dict(plain.state_dict(), strict=False).unexpected_keys == []
+    x = torch.rand(1, 16, 32, 32)
+    with torch.no_grad():
+        assert torch.equal(plain(x), ctx(x))
+        torch.nn.init.ones_(ctx.ctx_out.weight)
+        y = x.clone()
+        y[..., 0, 0] += 10.0
+        assert not torch.equal(ctx(x)[..., -1, -1], ctx(y)[..., -1, -1])
+        assert torch.equal(plain(x)[..., -1, -1], plain(y)[..., -1, -1])
+
+
+def _init_norm(conv):
+    """The weight norm of PyTorch's default conv init (`rescale_to_init`)."""
+    return math.sqrt(conv.weight.shape[0] / 3)
+
+
+def _shrunk(cfg):
+    """A model as a long run with weight decay leaves it: non-trivial BN
+    statistics and BN-fed convs a few times under their initial norm."""
+    torch.manual_seed(0)
+    model = Detector(cfg, 4).eval()
+    randomize_bn(model)
+    with torch.no_grad():
+        for conv, _ in conv_bn_pairs(model):
+            conv.weight.mul_(0.3)
+    return model
+
+
+def test_rescale_to_init_keeps_the_output_and_restores_the_norm() -> None:
+    model = _shrunk(SEG_KPT)
+    x = torch.rand(2, 3, 128, 128)
+    with torch.no_grad():
+        before = model(x)
+    n = rescale_to_init(model)
+    assert n == len(list(conv_bn_pairs(model))) > 0
+    with torch.no_grad():
+        after = model(x)
+    for a, b in zip(before, after, strict=True):
+        torch.testing.assert_close(b, a, rtol=1e-4, atol=1e-4)
+    for conv, _ in conv_bn_pairs(model):
+        assert conv.weight.norm().item() == pytest.approx(_init_norm(conv), rel=1e-4)
+
+
+def test_rescale_to_init_only_lifts() -> None:
+    model = _shrunk(TINY)
+    norms = [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)]
+    assert rescale_to_init(model, 0.0) == 0
+    assert [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)] == norms
+    rescale_to_init(model, 2.0)
+    lifted = [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)]
+    # a lower floor leaves weights already above it alone
+    assert rescale_to_init(model, 1.0) == 0
+    assert [conv.weight.norm().item() for conv, _ in conv_bn_pairs(model)] == lifted
+    for (conv, _), n in zip(conv_bn_pairs(model), lifted, strict=True):
+        assert n == pytest.approx(2 * _init_norm(conv), rel=1e-4)

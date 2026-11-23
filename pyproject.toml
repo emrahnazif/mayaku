@@ -4,14 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mayaku"
-version = "2.0.0"
-description = "Backend-portable detection / segmentation / keypoint library inspired by Detectron2."
+dynamic = ["version"]
+description = "Real-time detection, segmentation and keypoints that deploy on any accelerator."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-    {name = "Emrah Nazif", email = "emrah@datamarkin.com"},
-    {name = "Datamarkin", email = "support@datamarkin.com"}
+    {name = "Emrah Nazif", email = "emrah@datamarkin.com"}
 ]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
@@ -23,40 +22,25 @@ classifiers = [
   "Operating System :: MacOS :: MacOS X",
 ]
 dependencies = [
-  # Pinned per BACKEND_PORTABILITY_REPORT Appendix A.
   "torch>=2.4",
   "torchvision>=0.19",
   "numpy>=1.26",
+  "opencv-python-headless>=4.8",
   "pydantic>=2.6",
   "pyyaml>=6.0",
   "typer>=0.12",
   "pycocotools>=2.0.7",
-  "pillow>=10.0",
-  "scipy>=1.11",
+  "faster-coco-eval>=1.6",  # COCO AP in C++: the same numbers, several times faster
+  "pillow>=10.0",           # PIL images are an accepted prediction input
+  # every export goes through ONNX; the deployment runtimes (onnxruntime,
+  # OpenVINO, Core ML, TensorRT) are installed when first used, see
+  # mayaku/utils/requirements.py
+  "onnx>=1.16",
 ]
 
-[project.optional-dependencies]
-# onnxruntime is intentionally not pinned here: CPU and CUDA hosts need
-# different wheels (onnxruntime vs onnxruntime-gpu). Install manually:
-#   CPU / Apple Silicon:  pip install onnxruntime
-#   CUDA Linux/Windows:   pip install onnxruntime-gpu
-# The CLI reports the right install command if the package is missing.
-onnx = ["onnx>=1.16"]
-coreml = ["coremltools>=7.2"]
-openvino = ["openvino>=2024.3"]
-# TensorRT is CUDA-only. NVIDIA ships wheels for Linux x86_64,
-# Linux aarch64, and Windows x86_64; macOS has no NVIDIA GPU
-# support so the upstream `tensorrt` package's download stub fails
-# at install time on Darwin. The PEP 508 marker makes the dep
-# silently no-op on macOS so a single
-# `pip install -e '.[dev,onnx,coreml,openvino,tensorrt]'` line
-# works on every host without conditional logic from the user.
-# `onnx` is listed here so TRT export can reuse the ONNX front-end
-# without requiring the user to also install `[onnx]` separately.
-tensorrt = [
-  "onnx>=1.16",
-  "tensorrt>=10.0; sys_platform != 'darwin'",
-]
+[dependency-groups]
+# Development only, never part of the published package: install with
+# `pip install -e . --group dev` (pip >= 25.1).
 # The lint/type toolchain is PINNED, not floored. ruff and mypy change their
 # diagnostics between releases, and typeshed stubs change whether a third-party
 # call counts as typed — so an unpinned floor means CI resolves the newest on
@@ -68,17 +52,42 @@ dev = [
   "ruff==0.16.5",
   "mypy==2.3.1",
   "types-PyYAML==6.0.12.20260815",
-  "types-Pillow==10.2.0.20240822",
+]
+
+# Same pin-don't-floor reason as `dev` above, extended to what mypy actually
+# reads: torch ships `py.typed`, so its inline annotations are mypy input
+# exactly like typeshed is, and pinning the checker but not torch pins half the
+# input. Separate from `dev` on purpose — the test matrix must keep resolving
+# current torch, which is what the `>=` floor is for.
+typecheck = [
+  "torch==2.14.0",
+  "torchvision==0.29.0",
 ]
 
 [project.scripts]
-mayaku = "mayaku.cli.__main__:app"
+mayaku = "mayaku.cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/datamarkin/mayaku"
 
+[tool.hatch.version]
+path = "src/mayaku/__init__.py"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/mayaku"]
+# docs/ stays at the repository root (the website copies it from there) and
+# ships as mayaku/docs/, pages only, so coding agents read the docs of the
+# installed version offline.
+only-include = ["src/mayaku", "docs"]
+exclude = ["docs/assets"]
+
+[tool.hatch.build.targets.sdist]
+# The README's images and animation are served from GitHub, and hf/ holds the
+# Hugging Face model cards: neither is needed to build the package.
+exclude = ["docs/assets", "hf"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"docs" = "mayaku/docs"
 
 [tool.ruff]
 line-length = 100
@@ -101,6 +110,9 @@ ignore = [
   # ASCII substitutes. We don't put them in identifiers, so the
   # ambiguity ruff is guarding against doesn't apply.
   "RUF002", "RUF003",
+  # printf-style formatting is the house style of the training and model
+  # code's log lines; f-strings are not more correct, only different.
+  "UP031",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -108,7 +120,7 @@ ignore = [
 # Typer's idiom puts function calls in argument defaults; that's the
 # whole point of `typer.Argument(...)` / `typer.Option(...)` and
 # matches the official examples.
-"src/mayaku/cli/__main__.py" = ["B008"]
+"src/mayaku/cli/main.py" = ["B008"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -120,21 +132,47 @@ warn_unreachable = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_reexport = true
+# Two relaxations of `strict`, both for the same reason: torch is only partly
+# annotated. `no-untyped-call` fires solely at call sites into torch's bare
+# internals — our own code is annotated, so the code says nothing about mayaku
+# and only yields ignore comments that expire the day torch annotates the
+# function under them. Global is the only scope that works: per-module settings
+# match where the error is *reported*, which for this code is always `mayaku.*`.
 disallow_untyped_decorators = false  # torch decorators are untyped
+disable_error_code = ["no-untyped-call"]
 files = ["src/mayaku"]
 
 [[tool.mypy.overrides]]
 module = [
   "torchvision.*",
   "pycocotools.*",
-  "scipy.*",
+  "faster_coco_eval.*",
   "coremltools.*",
   "openvino.*",
   "onnxruntime.*",
-  "safetensors.*",
   "tensorrt.*",
+  "ijson.*",
+  "modelopt.*",
 ]
 ignore_missing_imports = true
+
+# The numerical core -- the network, the data pipeline, the loss and the
+# training loop, and the host decode -- is written in the unannotated style of
+# the research code it came from, where the tensor shapes in the docstrings
+# say more than `Tensor` annotations would. Annotated definitions there are
+# checked as strictly as anywhere; unannotated ones are left to the tests.
+[[tool.mypy.overrides]]
+module = [
+  "mayaku.model.*",
+  "mayaku.data.*",
+  "mayaku.engine.*",
+  "mayaku.inference.decode",
+]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_any_generics = false
+warn_return_any = false
+check_untyped_defs = false
 
 # torch.amp re-exports its public surface via plain `from .x import y`
 # (no `as y`), which trips mypy's no_implicit_reexport. Allow it for torch.
@@ -150,10 +188,6 @@ markers = [
   "cuda: requires a CUDA device",
   "mps: requires an Apple-Silicon MPS device",
   "multi_gpu: requires >= 2 CUDA devices",
-  "onnx: requires onnx package + onnxruntime or onnxruntime-gpu",
-  "coreml: requires coremltools (macOS)",
-  "openvino: requires openvino runtime",
-  "tensorrt: requires a CUDA device + tensorrt runtime",
   "slow: long-running test",
 ]
 filterwarnings = [
@@ -163,21 +197,10 @@ filterwarnings = [
   # warning from our own code still surfaces. Upstream fix tracked in
   # cocodataset/cocoapi.
   "ignore:.*__array__ implementation.*:DeprecationWarning:pycocotools.*",
-  # The LR-scheduler unit tests in test_engine_optim.py exercise the
-  # schedule math without an actual optimizer.step(), which trips
-  # PyTorch's "scheduler.step() before optimizer.step()" warning.
-  # The runtime sequencing is correct in the trainer (LRScheduler
-  # hook fires only after_step), so the warning is a test-shape
-  # artifact, not a real ordering bug.
-  "ignore:Detected call of:UserWarning",
   # We pin `dynamo=False` in ONNXExporter to avoid the new exporter's
   # `onnxscript` dep; PyTorch warns that the legacy path will go
   # away "starting in PyTorch 2.9". Revisit when we adopt the dynamo
   # path (will need `onnxscript` in `[onnx]`).
   "ignore:You are using the legacy TorchScript-based ONNX export:DeprecationWarning",
   "ignore:The feature will be removed:DeprecationWarning:torch.onnx.*",
-  # CoreML conversion still requires `torch.jit.trace`; PT 2.x warns
-  # that JIT will be removed eventually. Revisit when coremltools
-  # supports torch.export-based traces.
-  "ignore:`torch.jit.trace.*` is deprecated:DeprecationWarning",
 ]

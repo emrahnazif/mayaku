@@ -1,0 +1,299 @@
+"""The COCO ruler and the reference host decode."""
+
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+import torch
+
+from mayaku.data.coco import load_coco
+from mayaku.data.geometry import unletterbox
+from mayaku.engine import evaluation as evlib
+from mayaku.engine.evaluation import (
+    coco_ap,
+    evaluate,
+    operating_point,
+    score,
+    to_coco,
+    to_coco_segm,
+)
+from mayaku.inference.decode import DEPLOY, Detections, postprocess
+from mayaku.model import STRIDES, TINY, Detector
+
+from ._coco_fixture import fixture, synthetic_coco
+
+
+@pytest.fixture(scope="module")
+def ds(tmp_path_factory):
+    return fixture(tmp_path_factory.mktemp("coco"))
+
+
+def _as_detections(labels, masks=None):
+    """(n, 5) [class, x1, y1, x2, y2] labels -> `Detections` scored 1.0."""
+    return Detections(labels[:, 1:5].clone(), torch.ones(len(labels)), labels[:, 0].long(), masks)
+
+
+def test_annotations_as_detections_score_ap_1(ds) -> None:
+    raw = []
+    for i in range(len(ds)):
+        raw += to_coco(_as_detections(torch.from_numpy(ds.labels[i])), ds.ids[i], ds.cat_ids)
+    assert coco_ap(ds.ann_path, raw)["AP"] > 0.999
+
+
+def test_rasterised_boxes_score_segm_ap_1(ds) -> None:
+    res = []
+    for i in range(len(ds)):
+        h, w = ds.shapes[i]
+        labels = torch.from_numpy(ds.labels[i])
+        masks = torch.zeros(len(labels), h, w, dtype=torch.bool)
+        for k, (x1, y1, x2, y2) in enumerate(labels[:, 1:5].int().tolist()):
+            masks[k, y1:y2, x1:x2] = True
+        res += to_coco_segm(_as_detections(labels, masks), ds.ids[i], ds.cat_ids)
+    assert coco_ap(ds.ann_path, res, "segm")["AP"] > 0.999
+
+
+def test_letterbox_frame_round_trips_through_the_ruler(ds) -> None:
+    """Catches a pad or ratio applied in the wrong direction, which would
+    otherwise show up as a mysterious AP-S deficit."""
+    boxed = []
+    for i in range(len(ds)):
+        s = ds[i]
+        m = s["meta"]
+        back = s["labels"].clone()
+        back[:, 1:5] = unletterbox(back[:, 1:5], m["ratio"], m["pad"], m["shape"])
+        boxed += to_coco(_as_detections(back), m["id"], ds.cat_ids)
+    assert coco_ap(ds.ann_path, boxed)["AP"] > 0.99
+    # a known displacement costs AP without costing AP50
+    nudged = [dict(r, bbox=[r["bbox"][0] + 0.12 * r["bbox"][2], r["bbox"][1] + 0.12 * r["bbox"][3],
+                            r["bbox"][2], r["bbox"][3]]) for r in boxed]
+    moved = coco_ap(ds.ann_path, nudged)
+    assert moved["AP50"] > 0.999 and moved["AP"] < 0.9
+
+
+def _planted(nc, reg_max, hw, cell, bin_):
+    """Head outputs on an (H, W) canvas with one object lit at the finest
+    stride: class 1 at `cell` (row, col), DFL mass on `bin_` for every side,
+    so its box is the anchor centre plus and minus `bin_` strides."""
+    (h, w), (row, col) = hw, cell
+    preds = []
+    for s in STRIDES:
+        preds += [torch.full((1, nc, h // s, w // s), -10.0),
+                  torch.zeros(1, 4 * reg_max, h // s, w // s)]
+    preds[0][0, 1, row, col] = 10.0
+    preds[1][0, bin_::reg_max, row, col] = 10.0
+    cx, cy, reach = (col + 0.5) * STRIDES[0], (row + 0.5) * STRIDES[0], bin_ * STRIDES[0]
+    return preds, torch.tensor([cx - reach, cy - reach, cx + reach, cy + reach, 1.0, 1.0])
+
+
+@pytest.mark.parametrize("multi_label", [False, True])
+@pytest.mark.parametrize(("hw", "cell"), [((64, 64), (2, 3)), ((64, 128), (2, 11))])
+def test_postprocess_decodes_a_planted_object(multi_label, hw, cell) -> None:
+    """Anchor indices run row-major per level, so the lit cell is anchor
+    row * (W / 8) + col, on square and rectangular canvases alike."""
+    nc, reg_max = 4, 8
+    preds, want = _planted(nc, reg_max, hw, cell, 2)
+    d = dataclasses.replace(DEPLOY, conf=0.5, multi_label=multi_label)
+    dets, idxs, _, _ = postprocess(preds, nc, reg_max, d)
+    assert len(dets[0]) == 1 and idxs[0].tolist() == [cell[0] * (hw[1] // 8) + cell[1]]
+    assert (dets[0][0] - want).abs().max().item() < 0.05
+
+
+def test_evaluate_runs_end_to_end(ds) -> None:
+    stats = evaluate(Detector(TINY, ds.nc), ds, batch=4, d=dataclasses.replace(DEPLOY, conf=0.05))
+    assert stats["AP"] < 0.05     # untrained: what is under test is the plumbing
+
+
+@pytest.mark.parametrize("canvas", [320, (256, 384)])
+def test_evaluate_with_masks_and_keypoints(tmp_path, canvas) -> None:
+    ev = fixture(tmp_path, canvas=canvas, masks=True, kpt=3)
+    m = Detector(dataclasses.replace(TINY, seg=True, kpt=3), ev.nc).eval()
+    out = evaluate(m, ev, batch=4)
+    assert "segm_AP" in out and "kpt_AP" in out
+
+
+def test_keypoint_ap_scores_only_categories_with_keypoints(tmp_path) -> None:
+    """A multi-class file (COCO's 80 classes with person keypoints): the
+    classes without keypoint fields are left out of keypoint AP instead of
+    crashing pycocotools, and exact keypoints score 1."""
+    import json
+
+    anns, res = [], []
+    for i in range(4):
+        x, y = 20.0 + 10 * i, 30.0
+        kp = [x + 5, y + 5, 2, x + 20, y + 30, 2, x + 35, y + 55, 2]
+        anns += [{"id": 2 * i + 1, "image_id": i, "category_id": 1, "bbox": [x, y, 40, 60],
+                  "area": 2400.0, "iscrowd": 0, "keypoints": kp, "num_keypoints": 3},
+                 {"id": 2 * i + 2, "image_id": i, "category_id": 2, "bbox": [150, 150, 30, 30],
+                  "area": 900.0, "iscrowd": 0}]
+        res += [{"image_id": i, "category_id": 1, "keypoints": kp, "score": 1.0},
+                {"image_id": i, "category_id": 2, "keypoints": [160.0, 160.0, 1] * 3, "score": 0.9}]
+    path = tmp_path / "multi.json"
+    path.write_text(json.dumps({
+        "images": [{"id": i, "file_name": "%d.jpg" % i, "height": 240, "width": 320} for i in range(4)],
+        "annotations": anns,
+        "categories": [{"id": 1, "name": "person", "keypoints": ["a", "b", "c"]},
+                       {"id": 2, "name": "car"}]}))
+    assert coco_ap(str(path), res, "keypoints", k=3)["AP"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("mask_stride", [8, 4])
+def test_mask_decode_is_chunk_invariant(monkeypatch, mask_stride) -> None:
+    """Masks upsampled a few detections at a time, and RLE-encoded per chunk,
+    match the masks decoded all at once."""
+    import mayaku.inference.decode as dec
+    from mayaku.engine.evaluation import rle, rle_crops
+
+    torch.manual_seed(0)
+    model = Detector(dataclasses.replace(TINY, seg=True, mask_stride=mask_stride), 3, (64, 96)).eval()
+    with torch.no_grad():
+        preds = model(torch.rand(2, 3, 64, 96))
+    metas = [{"ratio": 1.0, "pad": (0, 0), "shape": (64, 96)},
+             {"ratio": 0.5, "pad": (0, 8), "shape": (96, 192)}]
+    whole = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True)
+    assert all(len(d) > 3 for d in whole)
+    monkeypatch.setattr(dec, "MASK_BUDGET", 1)          # one detection per chunk
+    chunked = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True)
+    encoded = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True, encode_mask=rle_crops)
+    for w, c, e in zip(whole, chunked, encoded, strict=True):
+        assert torch.equal(w.masks, c.masks)
+        assert [rle(m) for m in w.masks] == e.masks
+
+
+@pytest.mark.parametrize("mask_stride", [8, 4])
+def test_box_masks_equal_the_full_frame_path(mask_stride) -> None:
+    """Masks computed inside each box's rectangle match thresholding the
+    full-frame maps (`assemble` -> `to_canvas` -> `unletterbox_maps`),
+    letterboxed and not, with boxes touching the frame's edges."""
+    from mayaku.data.geometry import unletterbox_maps
+    from mayaku.model import mask as masklib
+
+    g = torch.Generator().manual_seed(0)
+    s, (hs, ws) = mask_stride, (64 // mask_stride, 96 // mask_stride)
+    feat = torch.randn(8, hs, ws, generator=g)
+    n = 40
+    kernels = torch.randn(n, 169, generator=g) * 0.5
+    xy = torch.rand(n, 2, generator=g) * torch.tensor([96.0, 64.0])
+    wh = torch.rand(n, 2, generator=g) * torch.tensor([60.0, 40.0]) + 1
+    boxes = torch.cat((xy - wh / 2, xy + wh / 2), 1)
+    boxes[:4] = torch.tensor([[0.0, 0, 96, 64], [-5, -5, 20, 20], [80, 50, 100, 70], [3, 0, 9, 64]])
+    points, stride = xy, torch.full((n, 1), 8.0)
+    for meta in ({"ratio": 1.0, "pad": (0, 0), "shape": (64, 96)},
+                 {"ratio": 0.5, "pad": (0, 8), "shape": (96, 192)},
+                 {"ratio": 0.37, "pad": (2, 5), "shape": (147, 254)}):
+        lg = masklib.assemble(feat, kernels, points, stride, boxes, s)
+        full = unletterbox_maps(masklib.to_canvas(lg, s), meta)[:, 0] > 0
+        got = torch.zeros_like(full)
+        img = torch.zeros(n, dtype=torch.long)
+        for k, m, rects in masklib.box_masks(feat[None], img, kernels, points, stride, boxes, s,
+                                             [meta], 1 << 12):
+            for i, mi, (y0, y1, x0, x1) in zip(k, m, rects.tolist(), strict=True):
+                assert not mi[y1 - y0:].any() and not mi[:, x1 - x0:].any()
+                got[i, y0:y1, x0:x1] = mi[:y1 - y0, :x1 - x0]
+        assert (got != full).sum() == 0, (meta, (got != full).sum())
+
+
+def test_rle_crops_equal_pycocotools() -> None:
+    """Crops placed anywhere in the frame, touching its edges and corners,
+    encode as the whole frame would."""
+    from mayaku.engine.evaluation import rle, rle_crops
+
+    g = torch.Generator().manual_seed(1)
+    h, w = 9, 7
+    rects = torch.tensor([[0, 9, 0, 7], [0, 4, 0, 3], [5, 9, 4, 7], [0, 9, 2, 3], [3, 4, 0, 7],
+                          [2, 6, 1, 5], [0, 9, 5, 7], [4, 4, 2, 2]])
+    m = torch.rand(len(rects), h, w, generator=g) > 0.4
+    m[0] = True
+    full = torch.zeros(len(rects), h, w, dtype=torch.bool)
+    for i, (y0, y1, x0, x1) in enumerate(rects.tolist()):
+        m[i, y1 - y0:], m[i, :, x1 - x0:] = False, False
+        full[i, y0:y1, x0:x1] = m[i, :y1 - y0, :x1 - x0]
+    assert rle_crops(m, rects, [(h, w)] * len(rects)) == [rle(x) for x in full]
+
+
+def test_rle_crops_of_whole_frames_equal_pycocotools() -> None:
+    """Edge cases for the device-side run lengths: empty, full, masks that
+    start or end on a set pixel, single pixels, random blobs."""
+    from mayaku.engine.evaluation import rle, rle_crops
+
+    def whole(masks):
+        n, h, w = masks.shape
+        return rle_crops(masks, torch.tensor([[0, h, 0, w]] * n), [(h, w)] * n)
+
+    g = torch.Generator().manual_seed(0)
+    h, w = 7, 5
+    m = torch.zeros(8, h, w, dtype=torch.bool)
+    m[1] = True
+    m[2, 0, 0] = True
+    m[3, -1, -1] = True
+    m[4, :, 0] = True
+    m[5, 2:5, 1:3] = True
+    m[6:] = torch.rand(2, h, w, generator=g) > 0.5
+    assert whole(m) == [rle(x) for x in m]
+    big = torch.rand(3, 61, 47, generator=g) > 0.7
+    assert whole(big) == [rle(x) for x in big]
+
+
+def test_a_mask_model_on_box_only_ground_truth_scores_boxes_only(tmp_path) -> None:
+    coco = load_coco(str(tmp_path), synthetic_coco(str(tmp_path), n=6, masks=False))
+    dets = []
+    for i in range(len(coco.ids)):
+        labels = torch.from_numpy(coco.labels[i])
+        dets.append((coco.ids[i], _as_detections(labels, torch.ones(len(labels), 8, 8, dtype=torch.bool))))
+    out = score(coco.ann_path, dets, coco.cat_ids, seg=True)
+    assert out["AP"] > 0.999 and not any(k.startswith("segm_") for k in out)
+
+
+def _operating_split(tmp_path, n_img, seed=0):
+    """`n_img` images with 10 separated objects each, one detection on every
+    object (score uniform 0.1-0.9) and 6 false ones per image (0.1-0.5)."""
+    import json
+    g = torch.Generator().manual_seed(seed)
+    images, anns, results = [], [], []
+    for i in range(n_img):
+        images.append({"id": i, "file_name": f"{i}.jpg", "width": 1000, "height": 100})
+        for k in range(10):
+            box = [100.0 * k + 10, 10.0, 50.0, 50.0]
+            anns.append({"id": len(anns) + 1, "image_id": i, "category_id": 1, "bbox": box,
+                         "area": 2500.0, "iscrowd": 0})
+            results.append({"image_id": i, "category_id": 1, "bbox": box,
+                            "score": 0.1 + 0.8 * float(torch.rand(1, generator=g))})
+        for k in range(6):
+            results.append({"image_id": i, "category_id": 1, "bbox": [100.0 * k + 70, 60.0, 20.0, 20.0],
+                            "score": 0.1 + 0.4 * float(torch.rand(1, generator=g))})
+    path = tmp_path / f"op{n_img}.json"
+    path.write_text(json.dumps({"images": images, "annotations": anns,
+                                "categories": [{"id": 1, "name": "thing"}]}))
+    return str(path), results
+
+
+def test_operating_point_picks_the_best_f1(tmp_path) -> None:
+    """Against a brute-force count per threshold: true detections are the
+    ones on an object, the others false; the pick is the grid value with the
+    best F1."""
+    ann, results = _operating_split(tmp_path, 80)
+    got = operating_point(ann, results)
+    n_gt, curve = 800, []
+    for t in evlib.OPERATING_GRID:
+        kept = [r for r in results if r["score"] >= t]
+        tp = sum(r["bbox"][1] == 10.0 for r in kept)
+        p, r = tp / len(kept), tp / n_gt
+        curve.append((t, p, r, 2 * p * r / (p + r)))
+    want = max(curve, key=lambda c: (c[3], c[0]))
+    assert got["predict_conf"] == want[0]
+    assert got["predict_precision"] == pytest.approx(want[1])
+    assert got["predict_recall"] == pytest.approx(want[2])
+    assert got["predict_f1"] == pytest.approx(want[3])
+
+
+def test_operating_point_applies_the_prediction_nms_and_needs_enough_objects(tmp_path) -> None:
+    """A lower-scoring copy of each true box is removed by NMS at 0.5 and is
+    a false detection when NMS lets it through; a small split gives None."""
+    ann, results = _operating_split(tmp_path, 80)
+    dup = [{**r, "bbox": [r["bbox"][0] + 2, *r["bbox"][1:]], "score": r["score"] * 0.95}
+           for r in results if r["bbox"][1] == 10.0]
+    clean, loose = operating_point(ann, results + dup, 0.5), operating_point(ann, results + dup, 0.95)
+    assert clean == operating_point(ann, results)
+    assert loose["predict_precision"] < clean["predict_precision"]
+    small, res = _operating_split(tmp_path, evlib.OPERATING_MIN_GT // 10 - 1)
+    assert operating_point(small, res) is None

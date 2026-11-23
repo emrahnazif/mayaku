@@ -1,344 +1,173 @@
-"""ONNX exporter for the in-scope detectors.
-
-Mirrors `BACKEND_PORTABILITY_REPORT.md` §5: target opset 17, the
-**Graph A** body (``backbone`` + FPN producing ``{p2..p6}``) is
-exported; the per-image Python glue (RPN top-k + per-class NMS,
-mask paste, keypoint sub-pixel decode) stays out of the exported
-graph by design (BPR §5/§6: keeping NMS in Python is what makes the
-ONNX export competitive vs Ultralytics' fused-NMS approach).
-
-Why split the model: a full Faster/Mask/Keypoint R-CNN forward
-includes the :class:`Instances` container (Python dict-of-fields),
-per-image loops, and `batched_nms` — none of which trace cleanly into
-ONNX. Exporting just the backbone+FPN body gives downstream consumers
-a deterministic, dynamic-shape-friendly feature extractor that pairs
-with the Python postprocess we already have (Step 16).
-
-Inputs/outputs of the exported graph:
-
-* Input: ``"image"`` shaped ``(N, 3, H, W)`` float32 RGB *normalised*
-  (mean already subtracted, std already divided). The
-  :class:`FasterRCNN._preprocess_image` step is *not* part of the
-  graph because pixel mean/std are model parameters and bake in
-  cleanly via constant folding; we still pass the model's
-  ``pixel_mean`` / ``pixel_std`` so the user can apply the same
-  normalisation outside the graph if they prefer.
-* Outputs: ``"p2"`` … ``"p6"``, each shaped ``(N, C, H/stride,
-  W/stride)`` with ``C = cfg.model.fpn.out_channels`` (256 by
-  default). Strides are 4, 8, 16, 32, 64 respectively.
-"""
+"""ONNX: the canonical artifact, and the source the OpenVINO and TensorRT
+builds start from. fp32 is the structural five-op graph; int8 (a
+quantization-aware model) is the same graph with the trained ranges as
+QuantizeLinear / DequantizeLinear around every conv."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+import io
+import tempfile
+import warnings
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
-from torch import Tensor, nn
 
-from mayaku.inference.export.base import ExportResult, ParityResult
-from mayaku.inference.export.full_detector import (
-    FULL_DETECTOR_OUTPUTS,
-    FullDetectorAdapter,
-    _FullDetector,
-    is_full_detector,
-)
+from mayaku.inference.export.metadata import embed_sidecar
+from mayaku.inference.preprocess import Canvases, planar
+from mayaku.model import Detector
+from mayaku.model.contract import assert_contract, export_onnx
+from mayaku.utils.requirements import install, pip_spec
 
-__all__ = ["ONNXExporter"]
-
-DEFAULT_OPSET: int = 17
-
-# The standard FPN output names (`Backbone.output_shape()` from Step 8).
-_DEFAULT_OUT_NAMES: tuple[str, ...] = ("p2", "p3", "p4", "p5", "p6")
-# Strides associated with the default FPN levels above. p6 is
-# `LastLevelMaxPool(stride=2)` of p5 → effective stride 64.
-_DEFAULT_STRIDES: dict[str, int] = {"p2": 4, "p3": 8, "p4": 16, "p5": 32, "p6": 64}
+PRECISIONS = ("fp32", "int8")
+REGRID_INT8 = True    # one-sided int8 ranges get the whole grid (`mayaku.model.quant`)
 
 
-class ONNXExporter:
-    """Export the backbone+FPN body to an ONNX graph + parity-check it.
-
-    Args:
-        opset: ONNX opset version. Default 17 (`spec §5`: gives RoiAlign
-            with ``coordinate_transformation_mode="half_pixel"`` and
-            modern ``Resize`` semantics).
-        output_names: Names of the FPN feature outputs. Defaults to
-            ``("p2", "p3", "p4", "p5", "p6")``.
-        dynamic_input_shape: When ``True`` (default), the exported
-            graph supports any ``(N, 3, H, W)`` input where ``H`` and
-            ``W`` are multiples of ``backbone.size_divisibility`` —
-            one ``.onnx`` file deploys to images of any size. When
-            ``False``, the graph is exported at the literal shape of
-            ``sample`` and any other input shape is rejected at
-            session.run() time.
-
-            This trade-off matters for **TensorRT throughput**: TRT's
-            engine builder produces dramatically faster kernels when
-            input shapes are static (it can pre-compile per-layer
-            algorithms for the exact shape). With dynamic shapes,
-            TRT either falls back to a one-size-fits-all kernel set
-            or rebuilds at runtime — both options are slower than
-            PyTorch eager for R-CNN-class graphs. Export with
-            ``dynamic_input_shape=False`` when targeting TRT.
-    """
-
-    name: str = "onnx"
-
-    def __init__(
-        self,
-        *,
-        opset: int = DEFAULT_OPSET,
-        output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        dynamic_input_shape: bool = True,
-    ) -> None:
-        self.opset = opset
-        self.output_names: tuple[str, ...] = tuple(output_names)
-        self.dynamic_input_shape = dynamic_input_shape
-
-    # ------------------------------------------------------------------
-    # Export
-    # ------------------------------------------------------------------
-
-    def export(
-        self,
-        model: nn.Module,
-        sample: Tensor,
-        out_path: Path,
-        **opts: object,
-    ) -> ExportResult:
-        """Serialise ``model`` (must expose ``.backbone``) to ``out_path``.
-
-        ``sample`` is a single normalised RGB batch ``(N, 3, H, W)``
-        used as the tracing input. The exporter wraps ``model.backbone``
-        in a small adapter that returns a *tuple* of feature tensors in
-        the order configured by ``output_names`` so torch's ONNX exporter
-        gets a deterministic output ordering (the model itself returns a
-        ``dict[str, Tensor]``, which traces less cleanly).
-        """
-        del opts  # Reserved for future per-target options.
-        # Full-detector models (UniQuery) expose ``export_forward`` — trace the
-        # whole graph (image -> boxes/scores/labels). Everything else exports the
-        # backbone+FPN body only (the R-CNN head doesn't trace cleanly).
-        if is_full_detector(model):
-            adapter: nn.Module = FullDetectorAdapter(model).eval()
-            out_names: tuple[str, ...] = FULL_DETECTOR_OUTPUTS
-            full = True
-        else:
-            adapter = _DictToTupleBackbone(_resolve_backbone(model), self.output_names).eval()
-            out_names = self.output_names
-            full = False
-
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        # When `dynamic_input_shape=True`: declare batch + spatial axes as
-        # dynamic so the graph supports any input size that's a multiple of
-        # `backbone.size_divisibility`. When `False`: bake the literal
-        # `sample.shape` for TRT throughput (see class docstring). The
-        # full-detector graph is single-image fixed-shape by construction (the
-        # top-k decode + box clamp bake the input size), so it's always static.
-        dynamic_axes: dict[str, dict[int, str]] | None
-        if self.dynamic_input_shape and not full:
-            dynamic_axes = {"image": {0: "batch", 2: "height", 3: "width"}}
-            for name in out_names:
-                dynamic_axes[name] = {0: "batch", 2: "height", 3: "width"}
-        else:
-            dynamic_axes = None
-
-        with torch.no_grad():
-            torch.onnx.export(
-                adapter,
-                (sample,),
-                str(out_path),
-                input_names=["image"],
-                output_names=list(out_names),
-                opset_version=self.opset,
-                dynamic_axes=dynamic_axes,
-                do_constant_folding=True,
-                # Pin the legacy TorchScript-based exporter so the
-                # only ONNX-side dependency is `onnx`/`onnxruntime`.
-                # The new dynamo path drags `onnxscript` into the
-                # required deps, which we'd rather defer.
-                dynamo=False,
-            )
-
-        return ExportResult(
-            path=out_path,
-            target=self.name,
-            opset=self.opset,
-            input_names=("image",),
-            output_names=out_names,
-        )
-
-    # ------------------------------------------------------------------
-    # Parity
-    # ------------------------------------------------------------------
-
-    def parity_check(
-        self,
-        model: nn.Module,
-        exported_path: Path,
-        sample: Tensor,
-        *,
-        atol: float = 1e-3,
-        rtol: float = 1e-3,
-    ) -> ParityResult:
-        """Run eager + ONNX Runtime on ``sample`` and compare per-output.
-
-        The ONNX Runtime session uses the CPU execution provider so the
-        check is reproducible on every backend (the eager forward
-        happens on whatever device ``model`` lives on; we move the
-        sample to that device for the eager half and back to CPU for
-        the comparison)."""
-        # Lazy import: onnxruntime is an optional extra.
-        try:
-            import onnxruntime as ort
-        except ModuleNotFoundError as e:
-            _ort_install_hint = (
-                "pip install onnxruntime-gpu"
-                if torch.cuda.is_available()
-                else "pip install onnxruntime"
-            )
-            raise ModuleNotFoundError(
-                f"ONNX verify requires onnxruntime. Install with: {_ort_install_hint}"
-            ) from e
-
-        # Full-detector graphs compare the (boxes, scores, labels) outputs;
-        # backbone graphs compare the FPN feature tensors.
-        if is_full_detector(model):
-            return self._parity_full(model, exported_path, sample, ort=ort, atol=atol, rtol=rtol)
-
-        backbone = _resolve_backbone(model)
-        backbone.eval()
-        device = next(iter(backbone.parameters())).device
-
-        with torch.no_grad():
-            eager_out = backbone(sample.to(device))
-        eager_tensors = {name: eager_out[name].cpu() for name in self.output_names}
-
-        sess = ort.InferenceSession(str(exported_path), providers=["CPUExecutionProvider"])
-        ort_inputs = {"image": sample.cpu().numpy()}
-        ort_out = sess.run(list(self.output_names), ort_inputs)
-
-        per_output: dict[str, tuple[float, float]] = {}
-        max_abs = 0.0
-        max_rel = 0.0
-        for name, ort_arr in zip(self.output_names, ort_out, strict=True):
-            ort_t = torch.from_numpy(ort_arr)
-            eager_t = eager_tensors[name]
-            abs_err = float((ort_t - eager_t).abs().max().item())
-            rel_err = float(((ort_t - eager_t).abs() / eager_t.abs().clamp(min=1e-8)).max().item())
-            per_output[name] = (abs_err, rel_err)
-            max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-
-        passed = max_abs <= atol or max_rel <= rtol
-        return ParityResult(
-            target=self.name,
-            passed=passed,
-            max_abs_error=max_abs,
-            max_rel_error=max_rel,
-            atol=atol,
-            rtol=rtol,
-            per_output=per_output,
-        )
-
-    def _parity_full(
-        self,
-        model: nn.Module,
-        exported_path: Path,
-        sample: Tensor,
-        *,
-        ort: object,
-        atol: float,
-        rtol: float,
-    ) -> ParityResult:
-        """Parity for the full-detector graph: eager ``export_forward`` vs ONNX
-        Runtime, per (boxes, scores, labels).
-
-        Top-k over near-equal scores can order detections differently between
-        PyTorch and ORT — a benign reordering of the *same* detection set (same
-        boxes, same scores, same COCO AP). Comparing element-wise by rank would
-        flag that as a huge error, so both sides are first aligned by a stable
-        box-coordinate sort; parity then reflects detection *content*, not which
-        runtime won a score tie.
-        """
-        import numpy as np
-
-        model.eval()
-        device = next(iter(model.parameters())).device
-        with torch.no_grad():
-            eager = cast(_FullDetector, model).export_forward(sample.to(device))
-        names = FULL_DETECTOR_OUTPUTS
-        eager_np = {n: t.detach().cpu().float().numpy() for n, t in zip(names, eager, strict=True)}
-
-        sess = ort.InferenceSession(  # type: ignore[attr-defined]
-            str(exported_path), providers=["CPUExecutionProvider"]
-        )
-        ort_np = dict(
-            zip(names, sess.run(list(names), {"image": sample.cpu().numpy()}), strict=True)
-        )
-
-        def _order(boxes: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
-            # np.lexsort's return type drifts across numpy versions (Any vs typed);
-            # np.asarray pins it without a version-specific ignore/cast.
-            keys = (boxes[:, 3], boxes[:, 2], boxes[:, 1], boxes[:, 0])
-            return np.asarray(np.lexsort(keys), dtype=np.intp)
-
-        eo, oo = _order(eager_np["boxes"]), _order(ort_np["boxes"])
-
-        per_output: dict[str, tuple[float, float]] = {}
-        max_abs = 0.0
-        max_rel = 0.0
-        for name in names:
-            e = eager_np[name][eo]
-            o = ort_np[name].astype(e.dtype)[oo]
-            abs_err = float(abs(o - e).max())
-            rel_err = float((abs(o - e) / abs(e).clip(min=1e-8)).max())
-            per_output[name] = (abs_err, rel_err)
-            max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-
-        return ParityResult(
-            target=self.name,
-            passed=max_abs <= atol or max_rel <= rtol,
-            max_abs_error=max_abs,
-            max_rel_error=max_rel,
-            atol=atol,
-            rtol=rtol,
-            per_output=per_output,
-        )
+def runnable() -> bool:
+    return True
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def onnx_graph(model: Detector, canvas: tuple[int, int], int8: bool, batch: int = 1,
+               regrid: bool = False) -> Iterator[Path]:
+    """The model as a contract-checked ONNX file in a temporary directory,
+    for the runtimes that build from ONNX."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model.onnx"
+        export_onnx(model, str(path), canvas, batch=batch, int8=int8, regrid=regrid)
+        yield path
 
 
-class _DictToTupleBackbone(nn.Module):
-    """Wrap a dict-returning backbone so ONNX export sees a fixed tuple.
-
-    ``torch.onnx.export`` understands tuple outputs much better than
-    ``dict[str, Tensor]``; the adapter just gathers the configured
-    output names and returns them in order.
-    """
-
-    def __init__(self, backbone: nn.Module, output_names: Sequence[str]) -> None:
-        super().__init__()
-        self.backbone = backbone
-        self.output_names = tuple(output_names)
-
-    def forward(self, image: Tensor) -> tuple[Tensor, ...]:
-        out = self.backbone(image)
-        return tuple(out[name] for name in self.output_names)
+def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
+          sidecar: Mapping[str, Any]) -> None:
+    export_onnx(model, str(path), canvas, int8=precision == "int8", regrid=REGRID_INT8)
+    if precision == "int8":
+        store_int8(path)
+        assert_contract(str(path), int8=True)
+    embed_sidecar(path, "onnx", dict(sidecar))
 
 
-def _resolve_backbone(model: nn.Module) -> nn.Module:
-    """Return ``model.backbone`` if it exists, else ``model`` itself.
+def store_int8(path: Path) -> None:
+    """Rewrite an int8 graph in the form ONNX Runtime runs as int8.
 
-    The CLI passes a full :class:`FasterRCNN`; user scripts may pass a
-    raw FPN. Either is fine — both expose the same forward contract
-    (``image -> dict[str, Tensor]`` of FPN levels)."""
-    if hasattr(model, "backbone") and isinstance(model.backbone, nn.Module):
-        return model.backbone
-    return model
+    The traced graph keeps each weight in float behind its QuantizeLinear,
+    and its activations' zero points are int8. ONNX Runtime fuses
+    DequantizeLinear -> Conv -> QuantizeLinear into one int8 convolution only
+    for int8 weight initializers, int32 biases and uint8 activations;
+    otherwise every conv runs in float between extra (de)quantize steps, and
+    the file is as large as fp32. Same network: each weight is the int8 value
+    its QuantizeLinear gave, each activation the same grid shifted by 128,
+    each bias rounded to the conv's accumulator step (input scale x weight
+    scale), as an int8 runtime adds it."""
+    import numpy as np
+    import onnx
+    from onnx import helper, numpy_helper
+
+    m = onnx.load(str(path))
+    g = m.graph
+    init = {i.name: i for i in g.initializer}
+    producer = {o: n for n in g.node for o in n.output}
+
+    def value(name: str) -> Any:    # an initializer, else a Constant node's value
+        t = init[name] if name in init else producer[name].attribute[0].t
+        return numpy_helper.to_array(t)
+
+    def add(array: Any, name: str) -> str:
+        name = f"{name}_{len(g.initializer)}"
+        g.initializer.append(numpy_helper.from_array(array, name))
+        return name
+
+    dropped, bias_dq, weight_dq = set(), [], set()
+    for conv in [n for n in g.node if n.op_type == "Conv"]:
+        x_dq, w_dq = producer[conv.input[0]], producer[conv.input[1]]
+        w_q = producer[w_dq.input[0]]
+        if not (x_dq.op_type == w_dq.op_type == "DequantizeLinear"
+                and w_q.op_type == "QuantizeLinear"):
+            continue    # a conv left in float (one that feeds a residual add)
+        w, w_scale = value(w_q.input[0]), value(w_q.input[1])
+        assert not np.any(value(w_q.input[2])), "weights are quantized symmetrically"
+        per_channel = w_scale.reshape((-1,) + (1,) * (w.ndim - 1))
+        w_dq.input[0] = add(np.clip(np.round(w / per_channel), -128, 127).astype(np.int8),
+                            conv.input[1] + "_int8")
+        dropped.add(w_q.output[0])
+        weight_dq.add(w_dq.output[0])
+        b_scale = value(x_dq.input[1]) * w_scale
+        b = np.round(value(conv.input[2]) / b_scale).astype(np.int32)
+        out = conv.input[2] + "_dq"     # zero point left out: 0
+        bias_dq.append(helper.make_node(
+            "DequantizeLinear",
+            [add(b, conv.input[2] + "_int32"), add(b_scale, conv.input[2] + "_scale")],
+            [out], axis=0))
+        conv.input[2] = out
+
+    nodes = [n for n in g.node if n.output[0] not in dropped]
+    uint8: dict[str, str] = {}      # int8 zero point -> the same grid as uint8
+    for n in nodes:
+        if n.op_type in ("QuantizeLinear", "DequantizeLinear") and len(n.input) > 2 \
+                and n.output[0] not in weight_dq and value(n.input[2]).dtype == np.int8:
+            z = n.input[2]
+            if z not in uint8:
+                uint8[z] = add((value(z).astype(np.int16) + 128).astype(np.uint8), z + "_u8")
+            n.input[2] = uint8[z]
+
+    nodes = bias_dq + nodes
+    used = {i for n in nodes for i in n.input}   # Constant nodes have no inputs
+    nodes = [n for n in nodes if n.op_type != "Constant" or n.output[0] in used]
+    kept = [i for i in g.initializer if i.name in used]
+    del g.node[:]
+    g.node.extend(nodes)
+    del g.initializer[:]
+    g.initializer.extend(kept)
+    onnx.checker.check_model(m)
+    onnx.save(m, str(path))
+
+
+def _session(ort: Any, path: Path, cuda: bool) -> Any:
+    """An onnxruntime session on CUDA when `cuda`, else the CPU. CUDA first
+    loads the CUDA and cuDNN libraries from their pip packages, which
+    onnxruntime does not find by itself."""
+    providers = ["CPUExecutionProvider"]
+    if cuda:
+        with contextlib.redirect_stdout(io.StringIO()):   # it prints each one it misses
+            ort.preload_dlls()
+        providers.insert(0, "CUDAExecutionProvider")
+    options = ort.SessionOptions()
+    # errors only: CUDA warns about every int8 graph, whose constant bias
+    # dequantization stays on the host (a few small copies, by design)
+    options.log_severity_level = 3
+    return ort.InferenceSession(str(path), options, providers=providers)
+
+
+class Session:
+    """onnxruntime, on CUDA when asked for and available, else the CPU."""
+
+    def __init__(self, path: Path, outputs: list[str], precision: str, device: str = "auto"):
+        import onnxruntime as ort
+
+        cuda = device.startswith(("cuda", "auto")) and \
+            "CUDAExecutionProvider" in ort.get_available_providers()
+        self._sess = _session(ort, path, cuda)
+        if cuda and "CUDAExecutionProvider" not in self._sess.get_providers():
+            # an onnxruntime-gpu installed without its CUDA libraries (before
+            # mayaku asked for them) falls back to the CPU: install them once
+            spec = pip_spec("onnxruntime")
+            error = install(spec, "onnxruntime runs on the CPU: its CUDA libraries are missing")
+            if error is None:
+                self._sess = _session(ort, path, cuda)
+            if "CUDAExecutionProvider" not in self._sess.get_providers():
+                warnings.warn(error or "onnxruntime runs on the CPU: its CUDA provider did not "
+                              f"load; reinstall it with: pip install '{spec}'", stacklevel=2)
+        inp = self._sess.get_inputs()[0]
+        self._input, self.outputs = inp.name, outputs
+        self.input_hw = tuple(inp.shape[-2:])
+        # traced at a fixed batch size (1 unless exported otherwise)
+        self.batch = inp.shape[0] if isinstance(inp.shape[0], int) else None
+
+    def canvases(self, n: int) -> Canvases | None:
+        return None        # the host conversion reads any array
+
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        maps = self._sess.run(self.outputs, {self._input: planar(x)})
+        return [torch.from_numpy(m) for m in maps]

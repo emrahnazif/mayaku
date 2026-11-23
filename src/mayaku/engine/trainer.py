@@ -1,453 +1,610 @@
-"""Training loop drivers.
+"""The training loop, the schedule, and the recipe that defines a run.
 
-Mirrors `DETECTRON2_TECHNICAL_SPEC.md` §3.1 (`engine/train_loop.py`):
+Recipe matters as much as architecture for a detector this size, so every
+choice that moves AP is a field of `Recipe` rather than a line of code, and
+two runs compare as a diff of two dataclasses. Where the run happens -- device,
+worker count, how often it evaluates, where it writes -- are arguments to
+`train`, not recipe fields.
 
-* :class:`TrainerBase` — the lifecycle: ``train(start_iter, max_iter)``
-  calls ``before_train`` → repeated ``before_step`` / ``run_step`` /
-  ``after_step`` → ``after_train``. Subclass and override
-  ``run_step``.
-* :class:`SimpleTrainer` — synchronous SGD step:
-  ``zero_grad → forward → backward → optimizer.step``.
-* :class:`AMPTrainer` — same loop, wrapped in
-  :func:`mayaku.backends.amp.autocast` and
-  :func:`make_grad_scaler`. The dtype (``fp16``/``bf16``) is read off
-  the :class:`Device` plus a config override (`spec §6.1`,
-  ``SolverConfig.amp_dtype``).
+Choices with a published number behind them:
 
-The hook protocol comes from :mod:`mayaku.engine.callbacks`.
-``register_hooks`` binds ``self`` onto each hook so hooks can read
-``trainer.iter`` / ``trainer.last_loss`` without an explicit argument.
+  no decay on norm and bias   +0.9 AP (RTMDet, arXiv 2212.07784)
+  cosine over step decay      +0.46 to +1.82 AP
+  clean final stage           +2.3 AP (RTMDet)
+  ATSS warmup into TAL        the alignment metric is noise while the
+                              predictions are, which is worst from scratch
+
+EMA is universally adopted and has no published isolated ablation: it is here
+because the whole field uses it.
 """
 
-from __future__ import annotations
-
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal
+import contextlib
+import copy
+import dataclasses
+import json
+import math
+import os
+import time
 
 import torch
-from torch import Tensor, nn
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel
+from torch.optim.swa_utils import update_bn
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from mayaku.backends.amp import NullGradScaler, autocast, make_grad_scaler
-from mayaku.backends.device import Device
-from mayaku.engine.callbacks import HookBase
-from mayaku.engine.distributed import get_world_size
-from mayaku.models.losses.set_criterion import SetCriterion
+from mayaku.data.augment import CLEAN_AUG, DEFAULT_AUG, Augment
+from mayaku.data.batch import (
+    batch_to,
+    collate,
+    rescale_batch,
+    seed_worker,
+    to_tensor,
+)
+from mayaku.data.canvas import multi_scale_canvases
+from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
+from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, ranked_metric, summary
+from mayaku.engine.loss import ClassifyLoss, DetectionLoss
+from mayaku.inference.decode import DEPLOY, PREDICT, Decode, PredictDecode
+from mayaku.model.quant import fake_quant_disabled, is_qat, observers, ranges_frozen
+from mayaku.utils.checkpoint import SIDECAR_KEY, atomic_save, check_sidecar, save_checkpoint
 
-__all__ = ["AMPTrainer", "GradClipType", "SimpleTrainer", "TrainerBase"]
-
-# Each loader yield is a list[dict] (DatasetMapper output, Step 6).
-DataIterable = Iterable[Sequence[Mapping[str, Any]]]
-
-# Matches `SolverConfig.clip_gradients_type` so the CLI can pass the
-# config field through verbatim.
-GradClipType = Literal["value", "norm"]
-
-
-class TrainerBase:
-    """Hook lifecycle wrapper. Subclasses implement :meth:`run_step`."""
-
-    iter: int = 0
-    start_iter: int = 0
-    max_iter: int = 0
-    storage: dict[str, float]
-    hooks: list[HookBase]
-    last_loss: float = 0.0
-
-    def __init__(self) -> None:
-        self.hooks = []
-        self.storage = {}
-
-    # ------------------------------------------------------------------
-    # Hook plumbing
-    # ------------------------------------------------------------------
-
-    def register_hooks(self, hooks: Sequence[HookBase]) -> None:
-        for h in hooks:
-            h.trainer = self
-            self.hooks.append(h)
-
-    def before_train(self) -> None:
-        for h in self.hooks:
-            h.before_train()
-
-    def after_train(self) -> None:
-        for h in self.hooks:
-            h.after_train()
-
-    def before_step(self) -> None:
-        for h in self.hooks:
-            h.before_step()
-
-    def after_step(self) -> None:
-        for h in self.hooks:
-            h.after_step()
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def train(self, start_iter: int, max_iter: int) -> None:
-        if max_iter < start_iter:
-            raise ValueError(f"max_iter={max_iter} < start_iter={start_iter}")
-        self.iter = self.start_iter = start_iter
-        self.max_iter = max_iter
-        try:
-            self.before_train()
-            for self.iter in range(start_iter, max_iter):
-                self.before_step()
-                self.run_step()
-                self.after_step()
-            # Match Detectron2's post-loop convention: `iter` reflects
-            # the count of *completed* iterations after the loop ends.
-            self.iter += 1
-        finally:
-            self.after_train()
-
-    def run_step(self) -> None:
-        raise NotImplementedError
+STATE = "state.pt"   # the resumable training state `train` writes to `out`
 
 
-# ---------------------------------------------------------------------------
-# SimpleTrainer
-# ---------------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class Recipe:
+    """One training run, and everything that defines it.
 
-
-class SimpleTrainer(TrainerBase):
-    """Synchronous SGD trainer.
-
-    ``run_step``: ``optimizer.zero_grad → loss = sum(model(batch).values())
-    → loss.backward → optimizer.step``. The model is expected to return
-    a dict of named loss tensors (the contract used by every
-    :class:`mayaku.models.detectors.FasterRCNN`).
+    Frozen so a run has a stable identity; vary one with
+    `dataclasses.replace(BASE, optimizer="adamw")`. The augmentation of each
+    stage and the host decode are whole objects rather than names, so the
+    record this serializes into reproduces the run.
     """
 
-    def __init__(
-        self,
-        model: nn.Module,
-        data_loader: DataIterable,
-        optimizer: torch.optim.Optimizer,
-        *,
-        grad_clip_norm: float | None = None,
-        grad_clip_type: GradClipType = "norm",
-        grad_accum_steps: int = 1,
-        grad_norm_log_enabled: bool = False,
-    ) -> None:
-        super().__init__()
-        if grad_clip_type not in ("value", "norm"):
-            raise ValueError(f"grad_clip_type must be 'value' or 'norm'; got {grad_clip_type!r}")
-        if grad_accum_steps < 1:
-            raise ValueError(f"grad_accum_steps must be >= 1; got {grad_accum_steps}")
-        self.model = model
-        self.data_loader = data_loader
-        self.optimizer = optimizer
-        self.grad_clip_norm = grad_clip_norm
-        self.grad_clip_type: GradClipType = grad_clip_type
-        self.grad_accum_steps = int(grad_accum_steps)
-        self.grad_norm_log_enabled = bool(grad_norm_log_enabled)
-        self._data_iter: Any = None
-        # Resolved once on first call; param-name → group-name map.
-        self._grad_norm_group_map: dict[str, str] | None = None
+    epochs: int = 125
+    # Images per optimizer micro-step across all GPUs: a run keeps its recipe
+    # on any GPU count, each of `world` ranks taking `batch / world` of it.
+    # 8 fits every tier at an 800 canvas on a 12 GB GPU; gradients still
+    # accumulate to `lr_ref_batch`. Raise it on bigger or several GPUs.
+    batch: int = 8
+    optimizer: str = "sgd"          # sgd | adamw | musgd
+    lr: float = 0.01
+    lr_final_frac: float = 0.01     # final LR as a fraction of `lr`
+    momentum: float = 0.937         # SGD only
+    beta1: float = 0.9              # AdamW only; not the same number
+    # musgd only: share of each hidden conv-weight step taken along the
+    # orthogonalised direction (see `mayaku.engine.muon`); 0 is plain SGD
+    muon_mix: float = 0.5
+    weight_decay: float = 5e-4
+    lr_ref_batch: int = 64          # batch size `lr` is quoted against
+    warmup_epochs: float = 3.0          # LR warmup, and the ramp of micro-batches per step
+    warmup_momentum_start: float = 0.8  # momentum ramps up from this
+    warmup_bias_lr_start: float = 0.1   # SGD/MuSGD bias LR ramps down from this
+    # Share of the run, at the end, trained with `final_aug` (the clean stage):
+    # 0.16 of 125 epochs is the last 20. See `final_epochs`.
+    final_frac: float = 0.16
+    assigner_warmup: int = 5        # epochs of ATSS before TAL
+    atss_soft: bool = False         # scale the ATSS class target by best IoU
+    cls_loss: str = "bce"           # bce | vfl
+    ema_decay: float = 0.9999
+    ema_tau: float = 2000.0
+    # Unaugmented training images the EMA's BatchNorm statistics are
+    # recomputed over before every evaluation and every checkpoint. 0
+    # disables it. See `recalibrate`.
+    recalibrate_images: int = 640
+    # TaskAligned alignment exponent beta in s^alpha * u^beta (TOOD's 6.0).
+    # Lower values let lower-IoU small positives rank.
+    tal_beta: float = 6.0
+    loc_weight_floor: float = 0.0   # floor the box/DFL loss weight (0 = off)
+    # Multi-scale training: the smallest size budget, 0 = off. When set,
+    # every batch is rendered at the dataset's canvas (the operating point,
+    # the maximum) and downscaled to a random rung of
+    # `mayaku.data.canvas.multi_scale_canvases`: the canvas each budget from
+    # `multiscale` up to the canvas's gives at the canvas aspect. Eval always
+    # runs at the canvas. Off by default: the rungs only shrink, so the model
+    # sees deploy-size large objects less often (objects of 640 px and up at
+    # a third of their rate at an 800 eval with budgets 640 to 800), and on 14
+    # RF100-VL datasets budgets 512 to 800 cost 0.9 test AP (median) against
+    # the fixed canvas. Worth turning on only to deploy below the canvas.
+    multiscale: int = 0
+    # auxiliary heads: the Dice loss weight and the positive cap for masks.
+    # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
+    seg_gain: float = 2.0
+    seg_cap: int = 250
+    kpt_gain: float = 1.0           # scales every keypoint term
+    # warm start: lift the pretrained convs that feed a BatchNorm to at least
+    # this multiple of their initial weight norm, output unchanged
+    # (`mayaku.model.blocks.rescale_to_init`); 0 loads them as they are
+    rescale_pretrained: float = 1.5
+    # oriented boxes: weight of the angle term, sin^2(2 * angle error)
+    obb_angle_gain: float = 1.0
+    seed: int = 0
+    amp: bool = True
+    # Multi-GPU (CUDA) only: BatchNorm statistics over the whole batch rather
+    # than each GPU's share, so the run matches its single-GPU equivalent.
+    sync_bn: bool = True
+    aug: Augment = DEFAULT_AUG
+    final_aug: Augment = CLEAN_AUG
+    decode: Decode = DEPLOY         # evaluation (COCO AP), recorded in the checkpoint
+    predict: PredictDecode = PREDICT  # what a prediction call uses, recorded alongside
 
-    def _next_batch(self) -> Sequence[Mapping[str, Any]]:
-        if self._data_iter is None:
-            self._data_iter = iter(self.data_loader)
-        try:
-            return next(self._data_iter)
-        except StopIteration:
-            # Loader exhausted: re-iterate. Detectron2's TrainingSampler
-            # is infinite (Step 6) so this branch is mainly for finite
-            # toy loaders used by tests.
-            self._data_iter = iter(self.data_loader)
-            return next(self._data_iter)
+    def __post_init__(self):
+        assert self.optimizer in ("sgd", "adamw", "musgd"), self.optimizer
+        assert 0.0 <= self.final_frac < 1.0, self.final_frac
 
-    def _effective_normalizer(self, micro_batches: Sequence[Any]) -> float | None:
-        """Effective-batch GT box count for box-normalized losses (e.g.
-        UniQuery), or ``None`` for models whose losses don't normalize by box
-        count (those use plain 1/N averaging across micro-batches).
+    @property
+    def final_epochs(self) -> int:
+        """Epochs in the clean final stage: `final_frac` of the run, rounded,
+        always shorter than the run."""
+        return min(round(self.final_frac * self.epochs), self.epochs - 1)
 
-        Summed over *all* gradient-accumulation micro-batches, so accumulation
-        matches a real batch instead of normalizing each micro-batch by its own
-        count. The DDP reduction is the criterion's own
-        :meth:`SetCriterion.reduce_num_boxes` — one source of truth for the
-        convention, so the accumulated path can't drift from the single-batch path.
-        """
-        model = getattr(self.model, "module", self.model)  # unwrap DDP
-        if not getattr(model, "loss_normalized_by_num_boxes", False):
-            return None
-        count = sum(len(x["instances"]) for batch in micro_batches for x in batch)
-        return SetCriterion.reduce_num_boxes(count, next(self.model.parameters()).device)
 
-    def _clip_grads(self) -> None:
-        """Apply value or norm clipping to trainable params, per
-        :attr:`grad_clip_type`. Caller is responsible for unscaling
-        gradients first when AMP is in use.
+BASE = Recipe()
 
-        ``grad_clip_type="norm"`` is global-norm clipping: PyTorch's
-        ``clip_grad_norm_(parameters, max_norm)`` flattens every
-        parameter's gradient into one vector and rescales them
-        uniformly if the concatenated norm exceeds ``max_norm``.
-        Detectron2's ``solver/build.py`` ``OptimizerWithGradientClip``
-        does the same. An earlier version of this method clipped
-        *per-parameter* at ``norm=1.0``, which is ~2–3 orders of
-        magnitude more aggressive than typical "aggressive" clipping
-        and starved RPN/FPN gradients enough that training stalled
-        on Faster R-CNN — see commit history for the post-mortem.
-        """
-        params = [p for p in self.model.parameters() if p.requires_grad]
-        assert self.grad_clip_norm is not None
-        if self.grad_clip_type == "value":
-            # clip_grad_value_ is element-wise — list vs single is equivalent.
-            torch.nn.utils.clip_grad_value_(params, clip_value=self.grad_clip_norm)
-        else:
-            torch.nn.utils.clip_grad_norm_(params, max_norm=self.grad_clip_norm)
 
-    # ------------------------------------------------------------------
-    # Gradient norm diagnostics
-    # ------------------------------------------------------------------
+def param_groups(model, decay):
+    """Weights decay; norms and biases do not.
 
-    # Order matters: first-match wins, so more-specific prefixes go first.
-    # Keys become metric column names (logged as ``grad_<key>``).
-    _GRAD_NORM_GROUPS: tuple[tuple[str, str], ...] = (
-        ("rpn_cls", "rpn.head.objectness_logits"),
-        ("rpn_loc", "rpn.head.anchor_deltas"),
-        ("rpn_conv", "rpn.head.conv"),
-        ("roi_cls", "roi_heads.box_predictor.cls_score"),
-        ("roi_loc", "roi_heads.box_predictor.bbox_pred"),
-        ("roi_box_head", "roi_heads.box_head"),
-        ("backbone_resnet", "backbone.bottom_up"),
-        ("backbone_fpn", "backbone."),
-    )
+    Decaying a BatchNorm scale pulls the layer's gain toward zero, which the
+    following layer then has to undo.
 
-    def _build_grad_norm_group_map(self) -> dict[str, str]:
-        mapping: dict[str, str] = {}
-        for name, p in self.model.named_parameters():
+    Three groups, not two. `warmup_bias_lr_start` starts the bias group above
+    `lr` and brings it down, which is right for a detection bias and wrong
+    for a BatchNorm gain, so norms get a group of their own.
+    """
+    decayed, norms, biases = [], [], []
+    for module in model.modules():
+        for name, p in module.named_parameters(recurse=False):
             if not p.requires_grad:
                 continue
-            matched = "other"
-            for grp_key, grp_prefix in self._GRAD_NORM_GROUPS:
-                if name.startswith(grp_prefix):
-                    matched = grp_key
-                    break
-            mapping[name] = matched
-        return mapping
-
-    def _compute_grad_norms(self) -> dict[str, float]:
-        """Per-group L2 grad norms (sqrt of sum-of-squares) plus ``total``.
-
-        Cheap: one ``.pow(2).sum()`` per parameter, summed by group, then
-        ``sqrt``. Numbers match what ``torch.nn.utils.clip_grad_norm_``
-        would report as the pre-clip norm if you concatenated only the
-        listed group's grads.
-        """
-        if self._grad_norm_group_map is None:
-            self._grad_norm_group_map = self._build_grad_norm_group_map()
-        sums: dict[str, float] = {"total": 0.0}
-        for grp_key, _ in self._GRAD_NORM_GROUPS:
-            sums[grp_key] = 0.0
-        sums["other"] = 0.0
-        for name, p in self.model.named_parameters():
-            if not p.requires_grad or p.grad is None:
-                continue
-            sq = float(p.grad.detach().pow(2).sum().item())
-            sums["total"] += sq
-            grp = self._grad_norm_group_map.get(name, "other")
-            sums[grp] = sums.get(grp, 0.0) + sq
-        return {k: v**0.5 for k, v in sums.items() if v > 0.0 or k == "total"}
-
-    def _forward_backward(
-        self, batch: Any, normalizer: float | None, scale: float
-    ) -> Mapping[str, Tensor]:
-        """One micro-batch forward + scaled backward; returns the raw loss dict
-        (unscaled) for metrics. Overridden by :class:`AMPTrainer` to add
-        autocast + the grad scaler. ``num_boxes`` is only passed to models that
-        normalize by box count (others don't accept the kwarg)."""
-        loss_dict: Mapping[str, Tensor] = (
-            self.model(batch, num_boxes=normalizer) if normalizer is not None else self.model(batch)
-        )
-        (_sum_loss(loss_dict) * scale).backward()  # type: ignore[no-untyped-call]
-        return loss_dict
-
-    def _accumulate(self) -> dict[str, float]:
-        """Gradient accumulation over ``grad_accum_steps`` micro-batches, with
-        the loss scaled so the SUMMED gradient equals a real effective batch's:
-          - box-normalized losses (UniQuery): normalize each micro-batch by the
-            EFFECTIVE-batch box count and sum (scale s=1). Per-micro
-            normalization would silently mis-weight and diverge from a real batch.
-          - other (mean-reduced) losses: scale s=1/N so the sum is the mean.
-        Returns the per-key losses already scaled (their sum is the step loss).
-        """
-        micro_batches = [self._next_batch() for _ in range(self.grad_accum_steps)]
-        normalizer = self._effective_normalizer(micro_batches)
-        s = 1.0 if normalizer is not None else 1.0 / self.grad_accum_steps
-        accum: dict[str, float] = {}
-        for batch in micro_batches:
-            loss_dict = self._forward_backward(batch, normalizer, s)
-            for k, v in loss_dict.items():
-                accum[k] = accum.get(k, 0.0) + float(v.detach().item()) * s
-        return accum
-
-    def run_step(self) -> None:
-        self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
-        accum = self._accumulate()
-        # Diagnostic: capture pre-clip per-group grad norms so a divergent
-        # run can be localised to a specific head (RPN cls vs ROI cls vs ...).
-        grad_norms = self._compute_grad_norms() if self.grad_norm_log_enabled else None
-        if self.grad_clip_norm is not None:
-            self._clip_grads()
-        self.optimizer.step()
-        self._record_floats(accum, sum(accum.values()), grad_norms=grad_norms)
-
-    def _record(self, loss_dict: Mapping[str, Tensor], total: Tensor) -> None:
-        self.last_loss = float(total.detach().item())
-        self.storage = {
-            "total_loss": self.last_loss,
-            **{k: float(v.detach().item()) for k, v in loss_dict.items()},
-        }
-
-    def _record_floats(
-        self,
-        loss_dict: Mapping[str, float],
-        total: float,
-        *,
-        grad_norms: Mapping[str, float] | None = None,
-    ) -> None:
-        """Same shape as :meth:`_record` but with already-evaluated floats.
-
-        Used by gradient-accumulation paths that have already reduced the
-        per-micro-batch tensors to scalars across the accumulation loop.
-        ``grad_norms`` (when provided) is recorded under ``grad_<key>``
-        names so :class:`MetricsPrinter` can include them in the line.
-        """
-        world = get_world_size()
-        if world > 1:
-            # Average across ranks so logged numbers are comparable to
-            # a single-GPU baseline rather than rank-0's local view. One
-            # all_reduce per iter — negligible vs the forward/backward
-            # work. Grad norms stay per-rank: they're diagnostic and
-            # the per-rank value is what would actually be clipped.
-            keys = sorted(loss_dict)
-            tensor = torch.tensor([loss_dict[k] for k in keys] + [total], dtype=torch.float32)
-            if torch.distributed.get_backend() == "nccl":
-                tensor = tensor.cuda()
-            torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
-            reduced: list[float] = (tensor / world).cpu().tolist()
-            loss_dict = dict(zip(keys, reduced[:-1], strict=True))
-            total = reduced[-1]
-        self.last_loss = total
-        record: dict[str, float] = {"total_loss": total, **dict(loss_dict)}
-        if grad_norms is not None:
-            for k, v in grad_norms.items():
-                record[f"grad_{k}"] = v
-        self.storage = record
+            if name == "bias":
+                biases.append(p)
+            elif isinstance(module, nn.modules.batchnorm._BatchNorm):
+                norms.append(p)
+            else:
+                decayed.append(p)
+    return [{"params": decayed, "weight_decay": decay, "bias": False},
+            {"params": norms, "weight_decay": 0.0, "bias": False},
+            {"params": biases, "weight_decay": 0.0, "bias": True}]
 
 
-# ---------------------------------------------------------------------------
-# AMPTrainer
-# ---------------------------------------------------------------------------
+def build_optimizer(model, r, accumulate):
+    """`lr` is quoted against `lr_ref_batch` images, not against `batch`, and
+    weight decay is scaled to the real gradient batch, so a run at batch 8
+    and a run at batch 64 are the same recipe.
+
+    SGD's `momentum` and AdamW's `beta1` are separate fields: they are
+    different quantities that happen to occupy the same slot.
+    """
+    decay = r.weight_decay * r.batch * accumulate / r.lr_ref_batch
+    groups = param_groups(model, decay)
+    if r.optimizer == "sgd":
+        return torch.optim.SGD(groups, lr=r.lr, momentum=r.momentum, nesterov=True)
+    if r.optimizer == "musgd":
+        # Hidden conv weights get the orthogonalised direction. The RGB input
+        # convs and the output projections stay plain SGD: Muon is defined
+        # for hidden layers, not for the first layer or the readout.
+        from mayaku.engine.muon import MuonSGD
+        readout = {id(c.weight) for c in model.readouts()}
+        hidden, plain = [], []
+        for w in groups[0]["params"]:
+            is_hidden = w.ndim == 4 and w.shape[1] != 3 and id(w) not in readout
+            (hidden if is_hidden else plain).append(w)
+        groups = [{**groups[0], "params": hidden, "muon": True},
+                  {**groups[0], "params": plain, "muon": False},
+                  *groups[1:]]
+        return MuonSGD(groups, lr=r.lr, momentum=r.momentum, mix=r.muon_mix)
+    return torch.optim.AdamW(groups, lr=r.lr, betas=(r.beta1, 0.999))
 
 
-class AMPTrainer(SimpleTrainer):
-    """SGD with autocast + ``GradScaler`` for fp16 / bf16 training.
+def cosine(r, epoch):
+    """LR multiplier at an epoch: a half cosine from 1 at the start down to
+    `lr_final_frac` at the end (Loshchilov & Hutter 2017, no restarts)."""
+    end = r.lr_final_frac
+    return end + (1 - end) * (1 + math.cos(math.pi * epoch / r.epochs)) / 2
 
-    Args (in addition to :class:`SimpleTrainer`):
-        device: The :class:`mayaku.backends.device.Device` whose AMP
-            kind / dtype the trainer will use.
-        amp_dtype: ``"fp16"`` or ``"bf16"``. Overrides
-            :attr:`Device.amp_dtype` so callers can opt into bf16 on
-            CUDA Ampere+ via config (`spec §6.1`,
-            ``SolverConfig.amp_dtype``).
+
+def set_lr(opt, r, epoch, it, warmup_iters):
+    """The only writer of the learning rate, called every iteration.
+
+    Warmup and cosine are one expression rather than an iteration-level ramp
+    racing an epoch-level scheduler. Under SGD biases start high and come
+    down; everything else, and every AdamW group (whose normalised steps a
+    high start would blow up), starts at zero and comes up. Momentum ramps
+    with them, and past `warmup_iters` the whole thing collapses to the
+    cosine.
+    """
+    cos = cosine(r, epoch)
+    x = min(it / warmup_iters, 1.0) if warmup_iters else 1.0
+    bias_start = 0.0 if r.optimizer == "adamw" else r.warmup_bias_lr_start
+    for g in opt.param_groups:
+        start = bias_start if g["bias"] else 0.0
+        g["lr"] = start + x * (r.lr * cos - start)
+        if "momentum" in g:
+            m0 = r.warmup_momentum_start
+            g["momentum"] = m0 + x * (r.momentum - m0)
+    return cos
+
+
+class EMA:
+    """A shadow copy of the weights, averaged with a ramping decay.
+
+    The ramp, decay * (1 - exp(-updates / tau)), makes it usable from step
+    one: far below `tau` updates the shadow tracks the model, and it only
+    becomes a long average once there is something worth averaging.
+
+    Parameters are averaged; buffers are copied, not averaged. A running
+    variance is a second moment and does not commute with a weight average
+    through a deep stack: averaged statistics stop describing what the
+    averaged weights produce, silently, with nothing in the loss to show it.
+
+    The tensor lists are paired once and updated with foreach kernels, and
+    hold references to the live tensors, so an optimizer that replaced
+    parameters rather than updating them in place would go unnoticed. None do.
+    The int8 ranges are buffers too; whether one has been observed is not,
+    so that is copied alongside them.
     """
 
-    def __init__(
-        self,
-        model: nn.Module,
-        data_loader: DataIterable,
-        optimizer: torch.optim.Optimizer,
-        device: Device,
-        *,
-        amp_dtype: str = "fp16",
-        grad_clip_norm: float | None = None,
-        grad_clip_type: GradClipType = "norm",
-        grad_accum_steps: int = 1,
-        grad_norm_log_enabled: bool = False,
-    ) -> None:
-        super().__init__(
-            model,
-            data_loader,
-            optimizer,
-            grad_clip_norm=grad_clip_norm,
-            grad_clip_type=grad_clip_type,
-            grad_accum_steps=grad_accum_steps,
-            grad_norm_log_enabled=grad_norm_log_enabled,
-        )
-        if amp_dtype not in ("fp16", "bf16"):
-            raise ValueError(f"amp_dtype must be 'fp16' or 'bf16'; got {amp_dtype!r}")
-        if not device.supports_amp:
-            raise ValueError(
-                f"AMPTrainer requires a backend with AMP support; {device.kind!r} does not."
-            )
-        self.device = device
-        self.amp_dtype = amp_dtype
-        # GradScaler is only useful for fp16; bf16's range covers the
-        # same gradient magnitudes that fp32 does, so the scaler is a no-op.
-        self.scaler: torch.amp.GradScaler | NullGradScaler
-        if amp_dtype == "fp16":
-            self.scaler = make_grad_scaler(device)
+    def __init__(self, model, decay=0.9999, tau=2000.0):
+        self.model = copy.deepcopy(model).eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        self.decay, self.tau, self.updates = decay, tau, 0
+        shadow, live = self.model.state_dict(), model.state_dict()
+        names = {k for k, _ in self.model.named_parameters()}
+        param_keys = [k for k in shadow if k in names]
+        param_set = set(param_keys)
+        self.shadow = [shadow[k] for k in param_keys]
+        self.live = [live[k] for k in param_keys]
+        buffers = [k for k in shadow if k not in param_set]
+        self.shadow_buffers = [shadow[k] for k in buffers]
+        self.live_buffers = [live[k] for k in buffers]
+        self.observers = list(zip(observers(self.model), observers(model), strict=True))
+
+    @torch.no_grad()
+    def update(self):
+        self.updates += 1
+        d = self.decay * (1 - math.exp(-self.updates / self.tau))
+        torch._foreach_mul_(self.shadow, d)
+        torch._foreach_add_(self.shadow, self.live, alpha=1 - d)
+        torch._foreach_copy_(self.shadow_buffers, self.live_buffers)
+        for s, live in self.observers:
+            if live.observed and not s.observed:
+                s.mark_observed()
+            elif s.observed and not live.observed:
+                s.reset()
+
+
+def hms(seconds):
+    """A short duration: 95 -> 1m35s, 7000 -> 1h56m."""
+    s = int(seconds)
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        return "%dm%02ds" % (s // 60, s % 60)
+    return "%dh%02dm" % (s // 3600, (s % 3600) // 60)
+
+
+class _Unaugmented(Dataset):
+    """The first `n` training images, letterboxed and unaugmented. Module
+    level, not local, so worker processes can pickle it under spawn."""
+
+    def __init__(self, ds, n):
+        self.ds, self.n = ds, min(n, len(ds))
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, i):
+        img = self.ds.load(i)[0]
+        while img is None:                       # skip a missing/corrupt file
+            img = self.ds.load(torch.randint(len(self.ds), (1,)).item())[0]
+        return to_tensor(img)
+
+
+# float AP minus int8 AP on the val split above which training warns
+INT8_GAP_WARN = 0.01
+
+
+def loss_text(totals, n):
+    """The running loss terms present, as "name value" pairs."""
+    return " ".join("%s %.3f" % (k, float(totals[k]) / n)
+                     for k in ("box", "cls", "dfl") if k in totals)
+
+
+def rank_score(rec, key):
+    """What `best.pt` is chosen on: the lower of a record's fp32 and int8
+    `key`; a record without `key` (none yet, or an older state.pt's `best`
+    ranked on another metric) ranks last."""
+    if key not in rec:
+        return -1.0
+    return min(rec[key], rec.get(key + "_int8", rec[key]))
+
+
+@torch.no_grad()
+def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
+    """Recompute BatchNorm running statistics for the model's own weights.
+
+    The EMA averages weights over the last ~tau steps, but its BatchNorm
+    buffers describe the live model's current weights; at a high learning
+    rate, where the two drift apart, its statistics stop matching what its
+    weights produce. Nothing in the loss shows it; only the scored AP
+    collapses, and it is worst where a BatchNorm sees the least data.
+
+    So the statistics are recomputed as a true population estimate (momentum
+    None, cumulative; `torch.optim.swa_utils.update_bn`) over `n` unaugmented
+    training images drawn through `train_ds.load`, which letterboxes and never
+    touches augmentation state. Runs before every evaluation and every
+    checkpoint, so the best checkpoint is chosen on honest numbers and
+    `fuse()` folds honest statistics into the deployed conv bias.
+
+    With QAT the int8 activation ranges are left as trained: the EMA copies
+    them from the live model every step, and they are the ranges the network
+    learned to work within. BatchNorm is recomputed with them frozen.
+    Recomputing them here as well, from the min / max of unaugmented images,
+    is wrong: a few images drive one deep channel far past anything a mosaic
+    batch produces (one P5 channel reached 4135 against a median of 14), the
+    per-tensor range follows that channel, and every other channel of the
+    tensor is left with a level or two. On a COCO nano checkpoint that
+    cost 4.8 AP (27.0 against 31.8 in float, AP-L 34.1 against 41.4) and made
+    the scored AP swing by up to 8 points between epochs; the trained ranges
+    score 31.6.
+    """
+    if n <= 0:
+        return
+    loader = DataLoader(_Unaugmented(train_ds, n), batch_size=batch, shuffle=False,
+                        num_workers=workers, pin_memory=device.startswith("cuda"))
+    with ranges_frozen(model):
+        update_bn((batch_to(imgs, device) for imgs in loader), model)
+
+
+def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
+          workers=0, eval_every=1, log_every=100, log=print, sidecar=None, resume=None):
+    """Run the recipe. Returns the best metrics, the EMA model, and the
+    per-epoch records (this call's epochs only, when resuming).
+
+    The canvas is the datasets' (both must agree). `val_ds` None trains
+    without evaluation: nothing is scored and no `best.pt` is written, so
+    `last.pt` is the run's result. Quantization-aware
+    training is a property of the model: pass one that went through
+    `mayaku.model.enable_qat` and training and the saved ranges are the
+    int8 ones; every evaluation also scores it in simulated int8
+    (`<key>_int8`). `best.pt` is the epoch with the highest `rank_score` of
+    the model's `ranked_metric`.
+
+    Every `log_every` iterations the running loss is printed with a rate and
+    an estimate; that line is the only place the host waits on the device
+    inside an epoch.
+
+    A record per epoch carries the loss parts, the assigner counters and the
+    full COCO metrics. They are returned, and appended to `out/log.jsonl` when
+    there is an `out`, next to `recipe.json` and `tier.json`, so a run
+    directory can always reproduce and rebuild its own model. With a
+    `sidecar` (`mayaku.utils.checkpoint.build_sidecar`), `best.pt` and
+    `last.pt` carry it next to the weights and are self-describing.
+
+    After every epoch `out/state.pt` holds everything needed to continue:
+    the live and EMA weights, the optimizer, the loss scaler, the best
+    metrics so far and the sidecar. Pass it back as `resume` (`load_state`)
+    with the same recipe and datasets and training continues at the next
+    epoch. The schedule is a function of the epoch and iteration, so it
+    needs no state of its own.
+
+    Under `torch.distributed` (see `mayaku.engine.distributed.launch`) every
+    rank calls this with the same arguments. Each trains on its own share of
+    every batch (`Recipe.batch` is the global batch, so the recipe does not
+    depend on the GPU count); rank 0 alone keeps the EMA, recalibrates,
+    evaluates, logs and writes, and only rank 0 needs a `val_ds`.
+
+    Returns `best` None when there is no `val_ds`, and (None, None, [])
+    on ranks other than 0.
+    """
+    canvas = train_ds.canvas
+    world, rank = get_world_size(), get_rank()
+    main = rank == 0
+    if r.batch % world:
+        raise ValueError("batch %d does not split over %d GPUs; use a multiple of %d"
+                         % (r.batch, world, world))
+    assert model.nc == train_ds.nc, "head and labels disagree"
+    if not main:
+        val_ds, out, log = None, None, lambda *_: None
+    if val_ds is not None:
+        assert val_ds.nc == model.nc, "head and validation labels disagree"
+        assert val_ds.canvas == canvas, "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
+    start = resume["epoch"] + 1 if resume else 0
+    # rank 0 keeps the single-GPU stream; the others draw their own
+    # augmentation (the weights are rank 0's, broadcast when wrapped)
+    torch.manual_seed(r.seed + start + 7919 * rank)
+    if rank:
+        train_ds.rng.seed(r.seed + start + 7919 * rank)
+    if resume:
+        model.load_state_dict(resume["model"])
+    model = model.to(device)
+    qat = is_qat(model)
+    accumulate = max(1, round(r.lr_ref_batch / r.batch))
+    opt = build_optimizer(model, r, accumulate)
+    if model.task == "classify":
+        crit = ClassifyLoss(model.nc)
+    else:
+        crit = DetectionLoss(nc=model.nc, reg_max=model.cfg.reg_max,
+                             cls_loss=r.cls_loss, warmup=r.assigner_warmup,
+                             atss_soft=r.atss_soft, tal_beta=r.tal_beta,
+                             loc_weight_floor=r.loc_weight_floor,
+                             seg=model.cfg.seg, seg_gain=r.seg_gain, seg_cap=r.seg_cap,
+                             kpt=model.cfg.kpt, kpt_gain=r.kpt_gain,
+                             obb=model.cfg.obb, obb_angle_gain=r.obb_angle_gain).to(device)
+    # Built from the plain model before any SyncBatchNorm swap, so the shadow
+    # (which rank 0 recalibrates and evaluates alone) never needs its peers.
+    ema = EMA(model, r.ema_decay, r.ema_tau) if main else None
+    amp = r.amp and device.startswith("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    if resume:
+        if ema is not None:
+            ema.model.load_state_dict(resume["ema"])
+            ema.updates = resume["ema_updates"]
+        opt.load_state_dict(resume["optimizer"])
+        scaler.load_state_dict(resume["scaler"])
+    # `fwd` runs the training forward: the model itself, or its DDP wrapper
+    fwd, sampler = model, None
+    if world > 1:
+        if r.sync_bn and device.startswith("cuda"):
+            # shares the parameters and buffers, so the model, the optimizer
+            # and the EMA keep reading the live tensors
+            fwd = nn.SyncBatchNorm.convert_sync_batchnorm(fwd)
+        cuda = [torch.device(device).index or 0] if device.startswith("cuda") else None
+        fwd = DistributedDataParallel(fwd, device_ids=cuda)
+        sampler = DistributedSampler(train_ds, world, rank, shuffle=True, seed=r.seed,
+                                     drop_last=True)
+
+    def make_loader():
+        # one OpenCV thread per data worker (default: one per core each, which
+        # costs ~6% loader speed on 2 x 8 workers); workers read it at fork
+        os.environ.setdefault("OPENCV_FOR_THREADS_NUM", "1")
+        return DataLoader(train_ds, batch_size=r.batch // world, shuffle=sampler is None,
+                          sampler=sampler, num_workers=workers, collate_fn=collate,
+                          drop_last=True, pin_memory=device.startswith("cuda"),
+                          worker_init_fn=seed_worker,
+                          persistent_workers=workers > 0)
+
+    loader = make_loader()
+    # multi-scale training downscales each batch from the rendered canvas
+    # (the maximum) to a random rung of the ladder; empty = fixed, as on a
+    # canvas no larger than a `multiscale` budget gives (the ladder is the
+    # canvas alone)
+    ms_sizes = multi_scale_canvases(canvas, r.multiscale) if r.multiscale else []
+    if len(ms_sizes) < 2:
+        ms_sizes = []
+    if ms_sizes and out:
+        log("multi-scale training over %s" % ms_sizes)
+    warmup_iters = round(r.warmup_epochs * len(loader))
+    log_path = os.path.join(out, "log.jsonl") if out else None
+    if out and not resume:
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "recipe.json"), "w") as f:
+            json.dump({**dataclasses.asdict(r), "canvas": list(canvas)}, f, indent=2)
+        with open(os.path.join(out, "tier.json"), "w") as f:
+            json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
+        open(log_path, "w").close()
+    stats = CLS_STATS if model.task == "classify" else STATS
+    records, best = [], resume["best"] if resume else {}
+    final_start = r.epochs - r.final_epochs
+    pending = 0     # micro-batches in the step being accumulated, across epochs
+
+    for epoch in range(start, r.epochs):
+        # `>=`, not `==`: a run resumed inside the final stage enters it at once
+        if epoch >= final_start and train_ds.aug not in (None, r.final_aug):
+            log("epoch %d: mosaic off, final stage %s" % (epoch, r.final_aug))
+            train_ds.aug = r.final_aug
+            # persistent workers hold their own copy of the dataset, so the
+            # switch only reaches them through a fresh loader; without this
+            # the final stage silently never happens. The old loader is
+            # dropped first so its workers exit before new ones fork.
+            loader = None
+            loader = make_loader()
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        fwd.train()
+        totals, t0 = {}, time.perf_counter()
+        for i, (imgs, targets, _, masks) in enumerate(loader):
+            it = epoch * len(loader) + i
+            lr = set_lr(opt, r, epoch, it, warmup_iters)
+            imgs = batch_to(imgs, device)
+            if masks is not None:               # still pinned: an async copy
+                masks = masks.to(device, non_blocking=True)
+            if ms_sizes:                        # multi-scale: one size per batch
+                s = ms_sizes[torch.randint(len(ms_sizes), (1,)).item()]
+                imgs, targets, masks = rescale_batch(
+                    imgs, targets, masks, s, model.cfg.seg, model.cfg.kpt, model.cfg.obb)
+            # Warmup also ramps the micro-batches per step from 1 up to
+            # `accumulate`, so a small dataset takes real steps from its first
+            # batch rather than one per `lr_ref_batch` images from the start.
+            acc = (accumulate if it >= warmup_iters
+                   else max(1, round(1 + (accumulate - 1) * it / warmup_iters)))
+            pending += 1
+            step = pending >= acc
+            # gradients are only exchanged on the micro-batch that steps
+            no_sync = fwd.no_sync() if world > 1 and not step else contextlib.nullcontext()
+            with no_sync:
+                with torch.amp.autocast("cuda", enabled=amp):
+                    loss, parts = crit(fwd(imgs), targets, epoch=epoch, masks=masks)
+                # summed over the step's micro-batches, not averaged, so `lr`
+                # means the same at any micro-batch size; DDP averages the
+                # ranks' gradients and the per-image sums are summed back
+                scaler.scale(loss * world if world > 1 else loss).backward()
+            if step:
+                pending = 0
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
+                if ema is not None:
+                    ema.update()
+            # kept as device tensors and reduced once below; reading them
+            # every iteration would sync the host against the GPU
+            for k, v in parts.items():
+                totals[k] = totals.get(k, 0) + v
+            if main and log_every and (i + 1) % log_every == 0:
+                done, spent = i + 1, time.perf_counter() - t0
+                log("  %5d/%-5d  %s  lr %.5f  %.0f img/s  epoch eta %s"
+                    % (done, len(loader), loss_text(totals, done),
+                       opt.param_groups[0]["lr"], done * r.batch / spent,
+                       hms(spent / done * (len(loader) - done))))
+
+        if world > 1:
+            totals = all_reduce_dict(totals)     # the mean over ranks
+        if not main:
+            synchronize()                        # wait out rank 0's epoch end
+            continue
+        left = (r.epochs - epoch - 1) * (time.perf_counter() - t0)
+        rec = {"epoch": epoch, "lr": r.lr * lr,
+               "secs": time.perf_counter() - t0,
+               **{k: float(v) / len(loader) for k, v in totals.items()}}
+        # honest statistics for everything scored or saved below
+        recalibrate(ema.model, train_ds, r.recalibrate_images,
+                    device=device, workers=min(workers, 4))
+        if val_ds is not None and ((epoch + 1) % eval_every == 0 or epoch == r.epochs - 1):
+            # the logged metrics are the fp32 graph's; a QAT model is also
+            # scored through the int8 simulation (ranges frozen in eval)
+            kw = dict(device=device, batch=r.batch, workers=workers, d=r.decode)
+            with fake_quant_disabled(ema.model) if qat else contextlib.nullcontext():
+                rec.update(evaluate(ema.model, val_ds, **kw))
+            key = ranked_metric(rec)
+            if qat:
+                rec[key + "_int8"] = evaluate(ema.model, val_ds, **kw)[key]
+            if rank_score(rec, key) > rank_score(best, key):
+                best = {"epoch": epoch, **{k: rec[k] for k in (*stats, key, key + "_int8")
+                                           if k in rec}}
+                if out:
+                    save_checkpoint(ema.model, os.path.join(out, "best.pt"), sidecar)
+                    with open(os.path.join(out, "best.json"), "w") as f:
+                        json.dump(best, f, indent=2)
+            gap = rec[key] - rec[key + "_int8"] if qat else None
+            log("epoch %3d  %s  %s" % (epoch, loss_text(rec, 1), summary(rec))
+                + ("" if gap is None else "  int8 vs float %+.1f %s%s"
+                   % (-100 * gap, key, "  WARNING" if gap > INT8_GAP_WARN else "")))
         else:
-            self.scaler = NullGradScaler()
-
-    def _forward_backward(
-        self, batch: Any, normalizer: float | None, scale: float
-    ) -> Mapping[str, Tensor]:
-        """Micro-batch forward under autocast + scaler-scaled backward (the only
-        difference from :meth:`SimpleTrainer._forward_backward`)."""
-        with autocast(self.device, dtype=_torch_dtype(self.amp_dtype)):
-            loss_dict: Mapping[str, Tensor] = (
-                self.model(batch, num_boxes=normalizer)
-                if normalizer is not None
-                else self.model(batch)
-            )
-            micro_total = _sum_loss(loss_dict) * scale
-        self.scaler.scale(micro_total).backward()  # type: ignore[no-untyped-call]
-        return loss_dict
-
-    def run_step(self) -> None:
-        self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
-        accum = self._accumulate()
-        # Unscale before computing diagnostic norms / clipping so values and the
-        # clip threshold are in real-gradient units, regardless of the loss scale.
-        if self.grad_clip_norm is not None or self.grad_norm_log_enabled:
-            self.scaler.unscale_(self.optimizer)
-        grad_norms = self._compute_grad_norms() if self.grad_norm_log_enabled else None
-        if self.grad_clip_norm is not None:
-            self._clip_grads()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self._record_floats(accum, sum(accum.values()), grad_norms=grad_norms)
+            log("epoch %3d  %s  %s, %s left"
+                % (epoch, loss_text(rec, 1), hms(rec["secs"]), hms(left)))
+        records.append(rec)
+        if out:
+            with open(log_path, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            save_checkpoint(ema.model, os.path.join(out, "last.pt"), sidecar)
+            state = {"epoch": epoch, "model": model.state_dict(), "ema": ema.model.state_dict(),
+                     "ema_updates": ema.updates, "optimizer": opt.state_dict(),
+                     "scaler": scaler.state_dict(), "best": best, SIDECAR_KEY: sidecar}
+            atomic_save(state, os.path.join(out, STATE))
+        synchronize()
+    if not main:
+        return None, None, []
+    return (best if val_ds is not None else None), ema.model, records
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _sum_loss(loss_dict: Any) -> Tensor:
-    if isinstance(loss_dict, Tensor):
-        return loss_dict
-    if isinstance(loss_dict, Mapping):
-        values: list[Tensor] = list(loss_dict.values())
-        if not values:
-            raise ValueError("model returned an empty loss dict")
-        total: Tensor = values[0]
-        for v in values[1:]:
-            total = total + v
-        return total
-    raise TypeError(
-        f"model must return a Tensor or Mapping[str, Tensor]; got {type(loss_dict).__name__}"
-    )
-
-
-def _torch_dtype(name: str) -> torch.dtype:
-    return torch.float16 if name == "fp16" else torch.bfloat16
+def load_state(path):
+    """The training state `train` wrote, from the file or its run directory,
+    with its sidecar checked; pass it to `train` as `resume`."""
+    path = os.path.join(path, STATE) if os.path.isdir(path) else str(path)
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    check_sidecar(state.get(SIDECAR_KEY), path)
+    return state

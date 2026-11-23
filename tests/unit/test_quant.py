@@ -1,0 +1,208 @@
+"""QAT activation ranges: recalibration, freezing, and continuation from a checkpoint."""
+
+from __future__ import annotations
+
+import copy
+
+import torch
+
+from mayaku.engine.trainer import recalibrate
+from mayaku.model import TINY, Detector, enable_qat
+from mayaku.model.quant import ActFakeQuant, ranges_frozen, recalibrate_ranges
+
+from ._coco_fixture import fixture
+
+
+def _qat_model() -> Detector:
+    torch.manual_seed(0)
+    return enable_qat(Detector(TINY, 4))
+
+
+def _ranges(model: torch.nn.Module) -> list[torch.Tensor]:
+    return [t.clone() for m in model.modules() if isinstance(m, ActFakeQuant)
+            for t in (m.mn, m.mx)]
+
+
+def _bn_stats(model: torch.nn.Module) -> list[torch.Tensor]:
+    return [t.clone() for m in model.modules() if isinstance(m, torch.nn.BatchNorm2d)
+            for t in (m.running_mean, m.running_var)]
+
+
+def _batches(n: int = 3, seed: int = 1) -> list[torch.Tensor]:
+    g = torch.Generator().manual_seed(seed)
+    return [torch.rand(2, 3, 64, 64, generator=g) * (i + 1) for i in range(n)]
+
+
+def test_recalibrated_range_is_the_mean_of_batch_ranges() -> None:
+    m = _qat_model()
+    batches = _batches()
+    recalibrate_ranges(m, batches)
+    # the first convolution's observer sees the image itself
+    obs = m.backbone.stem.c1.dense.conv.act_fq
+    want_mn = torch.stack([b.amin() for b in batches]).mean()
+    want_mx = torch.stack([b.amax() for b in batches]).mean()
+    assert torch.allclose(obs.mn, want_mn) and torch.allclose(obs.mx, want_mx)
+    assert obs.momentum == 0.99            # the training momentum is restored
+
+
+def test_recalibration_is_independent_of_prior_ranges() -> None:
+    m = _qat_model()
+    fresh = copy.deepcopy(m)
+    m.train()
+    with torch.no_grad():
+        for b in _batches(seed=7):         # training moves the ranges
+            m(b)
+    fresh.load_state_dict(m.state_dict())  # same weights and BN, other history
+    batches = _batches()
+    recalibrate_ranges(m, batches)
+    recalibrate_ranges(fresh, batches)
+    for a, b in zip(_ranges(m), _ranges(fresh), strict=True):
+        assert torch.equal(a, b)
+
+
+def test_range_pass_leaves_batchnorm_and_mode_alone() -> None:
+    m = _qat_model().train()
+    bn = _bn_stats(m)
+    recalibrate_ranges(m, _batches())
+    for a, b in zip(bn, _bn_stats(m), strict=True):
+        assert torch.equal(a, b)
+    assert m.training and all(mod.training for mod in m.modules())
+
+
+def test_ranges_frozen_keeps_ranges_but_not_batchnorm() -> None:
+    m = _qat_model()
+    recalibrate_ranges(m, _batches())
+    ranges, bn = _ranges(m), _bn_stats(m)
+    m.train()
+    with torch.no_grad(), ranges_frozen(m):
+        m(_batches(1, seed=3)[0])
+    assert all(torch.equal(a, b) for a, b in zip(ranges, _ranges(m), strict=True))
+    assert not all(torch.equal(a, b) for a, b in zip(bn, _bn_stats(m), strict=True))
+    assert all(o.observe for o in m.modules() if isinstance(o, ActFakeQuant))
+
+
+def test_trainer_recalibration_keeps_the_trained_ranges(tmp_path) -> None:
+    """The trainer's per-epoch recalibration recomputes BatchNorm and leaves
+    the int8 ranges the network trained with."""
+    m = _qat_model()
+    recalibrate_ranges(m, _batches())
+    ranges, bn = _ranges(m), _bn_stats(m)
+    recalibrate(m, fixture(tmp_path, n=8, canvas=64), 8, batch=4)
+    assert all(torch.equal(a, b) for a, b in zip(ranges, _ranges(m), strict=True))
+    assert not all(torch.equal(a, b) for a, b in zip(bn, _bn_stats(m), strict=True))
+
+
+def test_loaded_ranges_are_continued_not_overwritten() -> None:
+    trained = _qat_model()
+    recalibrate_ranges(trained, _batches())
+    loaded = enable_qat(Detector(TINY, 4))
+    loaded.load_state_dict(trained.state_dict())
+    obs = loaded.backbone.stem.c1.dense.conv.act_fq
+    before = obs.mn.clone()
+    x = _batches(1, seed=5)[0]
+    loaded.train()
+    with torch.no_grad():
+        loaded(x)
+    assert torch.allclose(obs.mn, 0.99 * before + 0.01 * x.amin())
+
+
+def test_no_qat_means_no_range_pass() -> None:
+    def never():
+        raise AssertionError("batches were read")
+        yield
+
+    recalibrate_ranges(Detector(TINY, 4), never())
+
+
+def test_gradient_passes_inside_the_range_and_stops_outside() -> None:
+    """Clipped straight-through: a value the int8 grid clips gets no gradient,
+    so training cannot keep inflating an activation the forward never shows."""
+    q = ActFakeQuant(symmetric=False)
+    q.load_state_dict({"mn": torch.tensor(0.0), "mx": torch.tensor(2.55)})
+    q.observe = False
+    x = torch.tensor([-1.0, 0.5, 2.0, 2.55, 3.0, 40.0], requires_grad=True)
+    y = q(x)
+    y.sum().backward()
+    assert torch.equal(x.grad, torch.tensor([0.0, 1.0, 1.0, 1.0, 0.0, 0.0]))
+    assert torch.allclose(y.detach(), torch.tensor([0.0, 0.5, 2.0, 2.55, 2.55, 2.55]))
+
+
+def test_symmetric_grid_is_centred_on_zero() -> None:
+    """Symmetric (the default): zero point 0, scale max|range| / 127, so a
+    one-sided range uses the positive half of the grid; affine spends the
+    whole grid on [min, max]."""
+    sym, aff = ActFakeQuant(), ActFakeQuant(symmetric=False)
+    for q in (sym, aff):
+        q.mn.fill_(0.0)
+        q.mx.fill_(2.54)
+    s, z = sym.qparams()
+    assert float(z) == 0.0 and abs(float(s) - 0.02) < 1e-7
+    s, z = aff.qparams()
+    assert float(z) == -128.0 and abs(float(s) - 2.54 / 255) < 1e-7
+
+
+def test_export_regrid_contains_the_trained_grid() -> None:
+    """A one-sided symmetric range exports with half the step and zero point
+    -128, so every trained level is a level of the export grid and values
+    round at least as finely; a range that goes negative, and `regrid` False,
+    keep the trained grid."""
+    one, two = ActFakeQuant(), ActFakeQuant()
+    one.mn.fill_(0.0)
+    one.mx.fill_(2.54)
+    two.mn.fill_(-1.0)
+    two.mx.fill_(2.54)
+    s, z = one.export_qparams(regrid=True)
+    assert float(z) == -128.0 and abs(float(s) - 0.01) < 1e-7
+    assert one.export_qparams() == one.qparams()
+    assert two.export_qparams(regrid=True) == two.qparams()
+    x = torch.linspace(0.0, 2.54, 2001)
+    trained = torch.fake_quantize_per_tensor_affine(x, 0.02, 0, -128, 127)
+    exported = torch.fake_quantize_per_tensor_affine(x, float(s), int(z), -128, 127)
+    assert torch.equal(torch.fake_quantize_per_tensor_affine(trained, float(s), int(z), -128, 127), trained)
+    assert ((exported - x).abs() <= (trained - x).abs() + 1e-6).all()
+
+
+def test_default_model_quantizes_symmetric_and_records_it() -> None:
+    from mayaku.model.quant import activation_scheme
+    assert activation_scheme(_qat_model()) == "symmetric"
+    assert activation_scheme(enable_qat(Detector(TINY, 4), symmetric=False)) == "affine"
+    assert activation_scheme(Detector(TINY, 4)) is None
+
+
+def test_every_tensor_has_one_int8_scale_in_the_export(tmp_path) -> None:
+    """The int8 graph quantizes each tensor once: every QuantizeLinear reading
+    one tensor has the same scale, so a runtime folds it into the producer;
+    residual adds quantize their skip operand (so they fuse into a conv)."""
+    import numpy as np
+    import onnx
+    from onnx import numpy_helper
+
+    from mayaku.model.contract import export_onnx
+    m = _qat_model()
+    recalibrate_ranges(m, _batches())
+    path = tmp_path / "m.onnx"
+    export_onnx(m.for_deploy(), str(path), (64, 64), int8=True)
+    g = onnx.load(str(path)).graph
+    consts = {i.name: numpy_helper.to_array(i) for i in g.initializer}
+    consts.update({n.output[0]: numpy_helper.to_array(n.attribute[0].t)
+                   for n in g.node if n.op_type == "Constant"})
+    scales = {}
+    for n in g.node:
+        if (n.op_type == "QuantizeLinear" and n.input[0] != "images" and n.input[1] in consts
+                and consts[n.input[1]].size == 1):
+            scales.setdefault(n.input[0], set()).add(float(np.asarray(consts[n.input[1]]).ravel()[0]))
+    assert scales and all(len(v) == 1 for v in scales.values())
+    producers = {o: n.op_type for n in g.node for o in n.output}
+    adds = [n for n in g.node if n.op_type == "Add"]
+    assert adds and all("DequantizeLinear" in {producers.get(i) for i in n.input} for n in adds)
+
+
+def test_observer_takes_fp16_activations() -> None:
+    """Under autocast the observed activation is fp16 and the running range
+    fp32; the update must not depend on them matching."""
+    q = ActFakeQuant()
+    q.train()
+    for i in range(3):
+        q(torch.full((4, 8), float(i + 1)).half())
+    assert q.mn.dtype == torch.float32
+    assert abs(float(q.mx) - (0.99 * (0.99 * 1 + 0.01 * 2) + 0.01 * 3)) < 1e-5
