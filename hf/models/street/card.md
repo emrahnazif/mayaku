@@ -77,6 +77,25 @@ predictor.export("onnx", precision="int8")
 
 See [Export](https://emrah.fr/mayaku/deployment/export/).
 
+## Run with OpenVINO
+
+The `openvino/` folder holds this model as OpenVINO IR, in fp16 and int8. Measured on an Intel
+CPU, int8 is the fast choice: {{openvino_speed}} per 1920×1080 frame
+end to end on an i9-10900X (median of 60 frames), and on 1,500 street validation images its box
+AP is within 0.3 of fp32.
+
+```python
+from huggingface_hub import snapshot_download
+from mayaku import from_pretrained
+
+folder = snapshot_download("enazif/{{name}}", allow_patterns="openvino/*")
+predictor = from_pretrained(f"{folder}/openvino/{{name}}-int8.xml")
+det = predictor("crossing.jpg")
+```
+
+The class names and decode settings are embedded in each file. They were written by
+`predictor.export("openvino", precision="int8")`, which works the same on a model you fine-tuned.
+
 ## The 22 classes
 
 | Group | Classes |

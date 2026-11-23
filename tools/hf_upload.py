@@ -7,6 +7,9 @@ Each model gets its own repo, ``enazif/<name>``, holding:
   from the checkpoint (Hugging Face also counts downloads by this file)
 - ``<name>.pth``: the checkpoint, fetched from the hosted manifest with its
   sha256 checked, so Hugging Face serves the same bytes as ``from_pretrained``
+- ``openvino/<name>-{fp16,int8}.{xml,bin}``: the checkpoint exported to OpenVINO
+
+With ``--upload`` the repos also go into the ``Mayaku street models`` collection.
 
 Run from the repo root:
 
@@ -24,6 +27,7 @@ import argparse
 import json
 from pathlib import Path
 
+from mayaku import from_pretrained
 from mayaku.inference.decode import predict_decode
 from mayaku.utils.checkpoint import load_checkpoint
 from mayaku.utils.download import download_model
@@ -43,6 +47,16 @@ MODELS = {
     "mayaku-m-det-street": ("32.4 M", "56.8", "", "6.42", "3.94"),
     "mayaku-m-seg-street": ("32.7 M", "56.8", "45.5", "10.4", "7.86"),
 }
+
+# name -> OpenVINO int8 end to end, one 1920x1080 frame, i9-10900X, median of 60
+# frames (measured 2026-11-24). Re-measure when the models or the export change.
+OPENVINO_MS = {
+    "mayaku-n-det-street": "11.6 ms",
+    "mayaku-n-seg-street": "26.8 ms",
+    "mayaku-m-det-street": "34.8 ms",
+    "mayaku-m-seg-street": "50.7 ms",
+}
+COLLECTION = "Mayaku street models"
 
 # tier -> (word, who it is for)
 TIERS = {
@@ -99,6 +113,7 @@ def render_card(name: str, cfg: dict) -> str:
         "height": str(height),
         "conf": f"{cfg['predict']['score']:g}",
         "iou": f"{cfg['predict']['nms_iou']:g}",
+        "openvino_speed": OPENVINO_MS[name],
     }
     text = CARD.read_text()
     for key, value in values.items():
@@ -138,6 +153,10 @@ def build(out: Path) -> list[Path]:
         cfg = config(name, ckpt)
         (folder / "README.md").write_text(render_card(name, cfg))
         (folder / "config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+        predictor = from_pretrained(ckpt, device="cpu")
+        for precision in ("fp16", "int8"):     # each checked against the model on export
+            predictor.export("openvino", folder / "openvino" / f"{name}-{precision}.xml",
+                             precision)
         print(f"built {folder}")
         folders.append(folder)
     return folders
@@ -157,6 +176,20 @@ def push(repo: str, folder: Path, repo_type: str = "model", **create) -> None:
     )
     prefix = "spaces/" if repo_type == "space" else ""
     print(f"uploaded https://huggingface.co/{prefix}{repo}")
+
+
+def collect(repos: list[str]) -> None:
+    """Put the repos in the owner's street-models collection (made once)."""
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    collection = api.create_collection(
+        COLLECTION, namespace=OWNER, exists_ok=True,
+        description="Ready-to-use Mayaku models for road scenes, from dashcam to drone: "
+                    "22 classes incl. e-scooters, faces and license plates.")
+    for repo in repos:
+        api.add_collection_item(collection.slug, repo, "model", exists_ok=True)
+    print(f"collection https://huggingface.co/collections/{collection.slug}")
 
 
 def main() -> None:
@@ -180,6 +213,7 @@ def main() -> None:
     if args.upload:
         for folder in folders:
             push(f"{OWNER}/{folder.name}", folder)
+        collect([f"{OWNER}/{folder.name}" for folder in folders])
 
 
 if __name__ == "__main__":
