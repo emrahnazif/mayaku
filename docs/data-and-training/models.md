@@ -1,14 +1,31 @@
-# Pretrained models, sizes and downloads
+# Models: base and ready-to-use, sizes, downloads
 
 <!--
-summary: The hosted model names, the model sizes with their parameters and compute, and how weights download.
+summary: The two kinds of hosted models, base models to fine-tune and ready-to-use models, their sizes, and how weights download.
 label: Models
-keywords: mayaku, pretrained models, model zoo, model sizes, download
+keywords: mayaku, pretrained models, model zoo, fine-tuning, model sizes, download
 -->
 
-## Hosted pretrained models
+## Two kinds of models
 
-Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pretrained(...)`, `mayaku predict`, `mayaku eval`, `mayaku export`). The checkpoint downloads the first time it is used.
+Mayaku hosts two kinds of models, and they are for different jobs:
+
+- **Base models** are a starting point for training on your own data. They are pretrained on Objects365 to learn what objects look like in general, and become accurate once you fine-tune them on your images and classes. They are not built to be used as they are.
+- **Ready-to-use models** are finished models for one kind of scene. Download one by name and predict, no training needed. You can still fine-tune them.
+
+Which one to start from:
+
+1. **A ready-to-use model covers your objects and your cameras:** use it as it is.
+2. **One comes close but not quite** (your own classes, an unusual camera, more accuracy on your scenes): fine-tune that ready-to-use model. It already knows those scenes.
+3. **None covers your task:** fine-tune a base model.
+
+Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pretrained(...)`, `mayaku predict`, `mayaku eval`, `mayaku export`). The checkpoint downloads the first time it is used. To see what is currently hosted:
+
+```bash
+mayaku download --list
+```
+
+## Base models
 
 | Name | Size | Task | Status |
 |---|---|---|---|
@@ -16,59 +33,22 @@ Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pre
 | `mayaku-n-seg` | nano | Instance segmentation | released |
 | `mayaku-m-det` | medium | Object detection | released |
 | `mayaku-m-seg` | medium | Instance segmentation | released |
-| `mayaku-n-det-street` | nano | Object detection, 22 street classes | released |
-| `mayaku-n-seg-street` | nano | Instance segmentation, 22 street classes | released |
-| `mayaku-m-det-street` | medium | Object detection, 22 street classes | released |
-| `mayaku-m-seg-street` | medium | Instance segmentation, 22 street classes | released |
 
-The first four are pretrained on Objects365 with its 365 classes, and are the starting point for training on your own data. The pattern is `mayaku-<size>-<task>`. The `-street` models are ready to use on road and street scenes without training (see [Street models](#street-models)). To see what is currently hosted:
-
-```bash
-mayaku download --list
-```
+The pattern is `mayaku-<size>-<task>`. They know Objects365's 365 classes, and fine-tuning replaces those with yours (see [Training](/docs/data-and-training/training.md)). On the 100 datasets of RF100-VL, fine-tuned `mayaku-n-det` averages 58.9 AP (see [the benchmark](/docs/index.md#fine-tuning-benchmark-rf100-vl)).
 
 No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md#train), [classification](/docs/more-tasks/classification.md#train).
 
-## Street models
+## Ready-to-use models
 
-The `-street` models detect what moves on or around a road, from every viewpoint a camera on a road has: dashcam, handheld, pole and CCTV, rooftop, drone and straight-down aerial. Use them as they are, or fine-tune them on your own street data like any other model.
+A ready-to-use model's name is a base model's name plus what it is made for.
 
-```python
-from mayaku import from_pretrained
+| Made for | Models | Details |
+|---|---|---|
+| Road and street scenes, dashcam to aerial, 22 classes | `mayaku-n-det-street`, `mayaku-n-seg-street`, `mayaku-m-det-street`, `mayaku-m-seg-street` | [Street models](/docs/ready-to-use/street.md) |
 
-predictor = from_pretrained("mayaku-n-seg-street")
-detections = predictor("crossing.jpg")
-```
+### Street models
 
-The 22 classes:
-
-| Group | Classes |
-|---|---|
-| People | person, face, helmet |
-| Micromobility and assistive | bicycle, e-scooter, motorcycle, wheelchair, stroller |
-| Vehicles | car, truck, bus, emergency vehicle, train, three-wheeler, construction vehicle, trailer |
-| Road objects | license plate, traffic light, safety sign, stop sign, traffic cone |
-| Other | animal |
-
-Some classes are broader or narrower than in COCO:
-
-- **car** is every light vehicle, vans, SUVs and pickups included. **truck** is heavy goods vehicles only.
-- **emergency vehicle** is police cars, ambulances and fire engines.
-- **e-scooter** is stand-up scooters. Seated scooters and mopeds are **motorcycle**.
-- **train** includes trams. **three-wheeler** is tricycles, rickshaws and tuk-tuks. **construction vehicle** is excavators and forklifts.
-- **safety sign** is regulatory and warning signs. Street-name, direction and shop signs are not detected. **stop sign** is its own class.
-- **helmet** is any helmet, worn or not. **animal** is one class for dogs, cats, horses, cattle, sheep, birds and deer.
-
-Accuracy on the street validation set (17,712 images from Objects365, COCO, Wikimedia Commons, drone and aerial sources, 22 classes, COCO AP @[.5:.95]):
-
-| Model | Box AP | Box AP50 | Mask AP |
-|---|---|---|---|
-| street nano | 43.9 | 60.0 | 35.2 |
-| street medium | 56.8 | 72.1 | 45.5 |
-
-The `-det` and `-seg` models of one size give the same boxes; the `-seg` model also gives masks. The validation labels come from the same automatic labelling as the training labels, so they share its mistakes: for example, faces on posters and statues are labelled as faces, and the model detects them too.
-
-The training images include Wikimedia Commons images under their individual free licences, the Songdo Vision dataset (Fonod, Cho, Yeo and Geroliminis, 2025), roundabout aerial images by De-Las-Heras, Sánchez-Soriano and Puertas, and aerial photos from Beeldmateriaal Nederland / PDOK. The labels were made with SAM 3.
+Their classes, accuracy, speed and limitations are on the [Street models](/docs/ready-to-use/street.md) page.
 
 ## Sizes
 

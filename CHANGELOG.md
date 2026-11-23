@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The docs tell the two kinds of hosted models apart: base models to fine-tune, and
+  ready-to-use models to run as they are. The street models have their own page: classes,
+  accuracy, speed, a comparison with COCO models and known limitations.
+
 ## v3.1.1: Street models
 
 - int8 ONNX and OpenVINO exports lose less accuracy. Most activations are ReLU outputs, which are

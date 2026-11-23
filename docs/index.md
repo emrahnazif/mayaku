@@ -7,7 +7,7 @@ keywords: mayaku, object detection, instance segmentation, fine-tuning, int8, co
 template: docs
 -->
 
-**The most accurate nano detector to fine-tune on your own data.** Mayaku is a real-time detector family built for the job most people actually have: take a pretrained model, train it on a few hundred images of your own objects, and ship it to whatever hardware you have.
+**The most accurate nano detector to fine-tune on your own data.** Mayaku is a real-time detector family built for the job most people actually have: take a pretrained model, train it on a few hundred images of your own objects, and ship it to whatever hardware you have. For common jobs there are also [ready-to-use models](#models) you run without training.
 
 Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on NVIDIA GPUs (CUDA), Apple Silicon (MPS) or the CPU, and every model exports to a graph of just five operations that runs on any runtime, including true int8 on NPUs.
 
@@ -44,6 +44,18 @@ predictor.export("onnx", "model.onnx")
 
 The pretrained weights download on first use, the classifier resizes to your classes, and the schedule, canvas and class count are set from your annotations.
 
+## Use a ready-to-use model
+
+```python
+from mayaku import from_pretrained
+
+predictor = from_pretrained("mayaku-m-det-street")   # 22 road and street classes, no training
+det = predictor("crossing.jpg")
+print(det.boxes, det.scores, det.labels)
+```
+
+The [Models](#models) section lists every ready-to-use model.
+
 ## Five operations, nothing else
 
 Every Mayaku model exports to a graph built from five operations: 1×1 and 3×3 convolutions (stride 1 or 2), ReLU, add, 3×3 max-pool and 2× nearest resize. No attention, no depthwise or grouped convolutions, no concatenation, no transposed convolutions. The export asserts it, so it can't drift. That one constraint is where the rest comes from:
@@ -73,6 +85,15 @@ RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, spo
 
 ## Models
 
+Mayaku hosts two kinds of models:
+
+- **Base models** are pretrained on Objects365 as a starting point for training on your own data. They are not built to be used as they are.
+- **Ready-to-use models** are finished models for one kind of scene: download and predict. You can still fine-tune them.
+
+[Models](/docs/data-and-training/models.md#two-kinds-of-models) says which to start from.
+
+Base models:
+
 | Name | Task | Params | GMACs (640) | Status |
 |---|---|---:|---:|---|
 | `mayaku-n-det` | detection | 5.2M | 6.7 | released |
@@ -80,7 +101,13 @@ RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, spo
 | `mayaku-m-det` | detection | 32.4M | 46.3 | released |
 | `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | released |
 
-All are pretrained on Objects365 and fine-tune from COCO JSON. Pass a name and Mayaku downloads the weights the first time.
+Ready-to-use models:
+
+| Made for | Models | Details |
+|---|---|---|
+| Road and street scenes, dashcam to aerial, 22 classes | `mayaku-n-det-street`, `mayaku-n-seg-street`, `mayaku-m-det-street`, `mayaku-m-seg-street` | [Street models](/docs/ready-to-use/street.md) |
+
+Pass a name and Mayaku downloads the weights the first time.
 
 ## Pages
 
@@ -92,7 +119,7 @@ First steps:
 Data and training:
 
 - [Datasets](/docs/data-and-training/datasets.md): the COCO JSON layout detection and segmentation need.
-- [Models](/docs/data-and-training/models.md): the hosted model names, the sizes, and how weights are downloaded.
+- [Models](/docs/data-and-training/models.md): base and ready-to-use models, which to start from, the sizes, and how weights are downloaded.
 - [Training](/docs/data-and-training/training.md): `mayaku.train`, the run directory, auto-config, resuming, multiple GPUs.
 
 Deployment:
@@ -106,6 +133,10 @@ More tasks:
 - [Instance segmentation](/docs/more-tasks/segmentation.md)
 - Experimental, in the library but not yet benchmarked: [image classification](/docs/more-tasks/classification.md), [keypoint detection](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md).
 
+Ready-to-use models:
+
+- [Street](/docs/ready-to-use/street.md): 22 road and street classes, dashcam to aerial, with accuracy, speed and limitations.
+
 Reference:
 
 - [Command line](/docs/reference/cli.md): every `mayaku` command and option.
@@ -116,6 +147,7 @@ Reference:
 ## Key facts
 
 - Package: `mayaku` on PyPI. Python 3.10, 3.11 or 3.12. Linux and macOS.
+- Two kinds of hosted models: base models (`mayaku-<size>-<task>`, Objects365, to fine-tune) and ready-to-use models (`mayaku-<size>-<task>-<scene>`, such as `mayaku-m-det-street`, to use without training).
 - License: Apache 2.0 for the library and every published model weight.
 - Public Python entry points: `mayaku.train`, `mayaku.evaluate`, `mayaku.from_pretrained`, `mayaku.health_check`.
 - Command line: `mayaku train`, `mayaku eval`, `mayaku predict`, `mayaku export`, `mayaku download`.
