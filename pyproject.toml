@@ -80,6 +80,11 @@ path = "src/mayaku/__init__.py"
 only-include = ["src/mayaku", "docs"]
 exclude = ["docs/assets"]
 
+[tool.hatch.build.targets.sdist]
+# The README's images and animation are served from GitHub, and hf/ holds the
+# Hugging Face model cards: neither is needed to build the package.
+exclude = ["docs/assets", "hf"]
+
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 "docs" = "mayaku/docs"
