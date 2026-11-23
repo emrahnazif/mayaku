@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import sys
+import warnings
 
 import pytest
 import torch
@@ -14,8 +16,16 @@ from torchvision.ops import box_iou
 from mayaku.config import InputConfig, KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.batch import batch_to
 from mayaku.inference import ArtifactPredictor, Predictor, from_pretrained
-from mayaku.inference.decode import decode_sidecar
-from mayaku.inference.export import TARGETS, export, open_session
+from mayaku.inference.decode import (
+    DEPLOY,
+    PREDICT,
+    PredictDecode,
+    decode,
+    decode_sidecar,
+    host_side,
+    predict_decode,
+)
+from mayaku.inference.export import TARGETS, _with_suffix, export, open_session
 from mayaku.inference.export.metadata import embed_sidecar, read_sidecar, strip_tensorrt_header
 from mayaku.inference.preprocess import letterbox_batch
 from mayaku.model.quant import qdq_export
@@ -70,11 +80,77 @@ def onnx_path(predictor, tmp_path_factory):
     return predictor.export("onnx", tmp_path_factory.mktemp("onnx") / "model.onnx")
 
 
+def test_prediction_decodes_with_the_predict_block(run, predictor) -> None:
+    """A call decodes with the sidecar's "predict" block (`PREDICT`), stated
+    in a warning; the recorded "decode" block (conf 0.3 in this fixture) is
+    the evaluation's, `decode="eval"`; `conf` overrides either."""
+    files = run[2]
+    sc = predictor.sidecar
+    assert PredictDecode.from_sidecar(sc["predict"]) == PREDICT == predict_decode(sc)
+    with pytest.warns(UserWarning, match="conf 0.4, NMS IoU 0.5"):
+        for conf, floor in ((None, PREDICT.conf), (0.02, 0.02)):
+            for g in predictor.batch(files, conf=conf):
+                assert (g.scores >= floor).all()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                # the eval decode is not announced
+        for g in predictor.batch(files, conf=0.02, decode="eval"):
+            assert (g.scores >= 0.02).all()
+        for g in predictor.batch(files, decode="eval"):
+            assert (g.scores >= sc["decode"]["conf"]).all()
+    x, metas = letterbox_batch(files, predictor.canvas)
+    want = decode_sidecar(predictor._forward(x), metas, sc, None, None, "predict")
+    loose = decode(predictor._forward(x), metas, len(predictor.class_names), sc["decode"]["reg_max"],
+                   seg=True, kpt=3, d=dataclasses.replace(PREDICT, iou=0.7))
+    for g, w, wide in zip(predictor.batch(files), want, loose, strict=True):
+        assert torch.equal(g.boxes, w.boxes) and torch.equal(g.labels, w.labels)
+        assert len(g) <= len(wide)                    # NMS 0.5 keeps no more than 0.7
+    with pytest.raises(ValueError, match="predict"):
+        predictor(files[0], decode="coco")
+
+
+def test_predict_decode_of_a_checkpoint_without_a_predict_block() -> None:
+    """Checkpoints written before the "predict" block (the hosted ones) get
+    `PREDICT`; a block, when present, is used as recorded."""
+    rec = {"strides": [8, 16, 32], "reg_max": 16, **dataclasses.asdict(DEPLOY)}
+    assert predict_decode({"decode": rec}) == PREDICT
+    own = {"conf": 0.6, "iou": 0.6, "max_det": 20, "topk": 500, "multi_label": True}
+    assert predict_decode({"decode": rec, "predict": own}) == PredictDecode(**own)
+
+
+def test_a_partial_predict_config_keeps_the_predict_defaults() -> None:
+    """Setting only some `train.predict` fields keeps `PREDICT`'s others,
+    not the evaluation's (`DEPLOY`)."""
+    cfg = MayakuConfig.model_validate({"train": {"predict": {"conf": 0.3}}})
+    assert cfg.train.predict == dataclasses.replace(PREDICT, conf=0.3)
+    assert MayakuConfig().train.predict == PREDICT and MayakuConfig().train.decode == DEPLOY
+
+
+def test_predict_settings_stay_out_of_the_recorded_config(predictor, run) -> None:
+    """The "predict" block is the only copy, so versions that predate
+    `train.predict` still read the config; reading it back restores it."""
+    from mayaku.utils.checkpoint import read_deploy_checkpoint
+
+    assert "predict" not in predictor.sidecar["config"]["train"]
+    assert read_deploy_checkpoint(run[1])[1].train.predict == PREDICT
+
+
+def test_decode_runs_on_the_cpu_off_cuda() -> None:
+    """`host_side` (the first step of `decode`) keeps CUDA tensors where they
+    are and brings every other device's to the CPU, where MPS's decode is
+    several times faster."""
+    t = torch.zeros(2)
+    assert host_side([t])[0] is t
+    if torch.backends.mps.is_available():
+        assert host_side([t.to("mps")])[0].device.type == "cpu"
+    if torch.cuda.is_available():
+        assert host_side([t.cuda()])[0].is_cuda
+
+
 def test_predictor_matches_the_evaluation_path(run, predictor) -> None:
     """Image files through the Predictor give exactly the detections the
     dataset's eval path + decode give: same preprocessing, same decode."""
     ds, _, files = run
-    got = predictor.batch(files)
+    got = predictor.batch(files, decode="eval")
     samples = [ds[i] for i in range(len(files))]
     x = batch_to(torch.stack([s["img"] for s in samples]), "cpu")
     want = decode_sidecar(predictor.model(x), [s["meta"] for s in samples], predictor.sidecar)
@@ -168,9 +244,10 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
     # an int8 artifact runs the int8 graph, so it is held to the Torch int8
     # simulation, not to the float model (on this barely trained model many
     # detections sit at the threshold, where int8 rounding moves the count)
+    # the recorded decode (conf 0.3, multi-label), as before prediction defaults existed
     with qdq_export(predictor.model) if precision == "int8" else contextlib.nullcontext():
-        want = predictor.batch(run[2])
-    got = a.batch(run[2])
+        want = predictor.batch(run[2], decode="eval")
+    got = a.batch(run[2], decode="eval")
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
     if target == "tensorrt":    # the first call records a CUDA graph, later calls replay it
         s = open_session(path, a.sidecar, "cuda")
@@ -183,14 +260,86 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
         assert not all(torch.equal(f, o) for f, o in zip(first, other, strict=True))
 
 
+def test_int8_onnx_stores_int8_and_runs_as_int8(predictor, onnx_path, tmp_path) -> None:
+    """Weights stored as int8 (a quarter of the fp32 file) in the form ONNX
+    Runtime fuses into int8 convolutions, not float convs between extra
+    (de)quantize steps."""
+    import onnx
+    import onnxruntime as ort
+
+    int8 = predictor.export("onnx", tmp_path / "int8.onnx", "int8")
+    assert int8.stat().st_size < 0.4 * onnx_path.stat().st_size
+    options = ort.SessionOptions()
+    options.optimized_model_filepath = str(tmp_path / "optimized.onnx")
+    ort.InferenceSession(str(int8), options, providers=["CPUExecutionProvider"])
+    ops = [n.op_type for n in onnx.load(options.optimized_model_filepath).graph.node]
+    convs = {op: ops.count(op) for op in ("QLinearConv", "Conv", "FusedConv")}
+    # the convs that feed a residual add or an output have no int8 output range
+    # and stay float; on tier n the rest are a little over half of them
+    assert convs["QLinearConv"] > 0.5 * sum(convs.values()), convs
+
+
 def test_export_refuses_what_a_target_or_model_cannot_do(predictor, tmp_path) -> None:
     with pytest.raises(ValueError, match="fp16"):
         predictor.export("onnx", tmp_path / "m.onnx", "fp16")
     with pytest.raises(ValueError, match="unknown export target"):
         predictor.export("tflite", tmp_path / "m.tflite")
+    with pytest.raises(ValueError, match=r"written as \.onnx, not \.xml"):
+        predictor.export("onnx", tmp_path / "m.xml")
     plain = {**predictor.sidecar, "quant": {**predictor.sidecar["quant"], "qat": False}}
     with pytest.raises(ValueError, match="quantization-aware"):
         export(predictor.model, plain, "onnx", tmp_path / "m.onnx", "int8")
+
+
+def test_export_adds_the_target_extension(tmp_path) -> None:
+    """A name without the target's extension still gives a file that loads
+    back by its suffix."""
+    assert _with_suffix(tmp_path / "street.v2", "onnx") == tmp_path / "street.v2.onnx"
+    assert _with_suffix(tmp_path / "street", "openvino") == tmp_path / "street.xml"
+    assert _with_suffix(tmp_path / "street.ONNX", "onnx") == tmp_path / "street.ONNX"
+
+
+def test_onnx_on_cuda_loads_its_libraries_and_repairs_a_cpu_fallback(monkeypatch) -> None:
+    """onnxruntime-gpu finds the CUDA libraries of their pip packages only
+    when preloaded, and one installed without them (cuRAND, which torch's
+    wheels lack) silently runs on the CPU: the session installs them once and
+    retries, and says so when that does not help."""
+    import types
+
+    from mayaku.inference.export import onnx as ox
+
+    calls: list[str] = []
+    cuda_loads = [False, True]                 # the first session falls back, the retry runs
+
+    class Sess:
+        def __init__(self, path, options, providers) -> None:
+            calls.append("session")
+            ok = "CUDAExecutionProvider" in providers and cuda_loads.pop(0)
+            self.providers = providers if ok else ["CPUExecutionProvider"]
+
+        def get_providers(self) -> list[str]:
+            return self.providers
+
+        def get_inputs(self) -> list:
+            return [types.SimpleNamespace(name="x", shape=[1, 3, 64, 64])]
+
+    ort = types.SimpleNamespace(
+        get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        preload_dlls=lambda: calls.append("preload"), SessionOptions=types.SimpleNamespace,
+        InferenceSession=Sess)
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    monkeypatch.setattr(ox, "pip_spec", lambda name: "onnxruntime-gpu[cuda,cudnn]>=1.27")
+    monkeypatch.setattr(ox, "install", lambda spec, why: calls.append(spec))
+    s = ox.Session(None, ["cls0"], "fp32", "cuda")
+    assert s._sess.get_providers()[0] == "CUDAExecutionProvider"
+    assert calls == ["preload", "session", "onnxruntime-gpu[cuda,cudnn]>=1.27", "preload", "session"]
+
+    cuda_loads[:] = [False, False]
+    with pytest.warns(UserWarning, match="runs on the CPU"):
+        ox.Session(None, ["cls0"], "fp32", "cuda")
+    calls.clear()
+    ox.Session(None, ["cls0"], "fp32", "cpu")          # the CPU asks for nothing
+    assert calls == ["session"]
 
 
 def test_an_onnx_file_without_a_sidecar_is_refused(onnx_path, tmp_path) -> None:

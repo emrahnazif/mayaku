@@ -1,9 +1,10 @@
----
-title: Export to ONNX, Core ML, OpenVINO and TensorRT
+# Export to ONNX, Core ML, OpenVINO and TensorRT
+
+<!--
 summary: Export a trained model for deployment, choose a precision, use int8, and run it with or without Mayaku.
 label: Export
 keywords: mayaku, export, onnx, coreml, openvino, tensorrt
----
+-->
 
 `mayaku export` turns a trained checkpoint into a file for a deployment runtime: ONNX, Core ML, OpenVINO or TensorRT. Every task exports: detection, segmentation, keypoints, oriented boxes and classification.
 
@@ -25,7 +26,7 @@ mayaku eval model.onnx --annotations data/test/_annotations.coco.json --images d
 from mayaku import from_pretrained
 
 predictor = from_pretrained("model.onnx")
-det = predictor("photo.jpg", conf=0.25)
+det = predictor("photo.jpg")
 ```
 
 ## Targets
@@ -37,7 +38,7 @@ det = predictor("photo.jpg", conf=0.25)
 | `openvino` | `.xml` + `.bin` | `fp32`, `fp16`, `int8` | Intel CPUs, integrated GPUs, NPUs |
 | `tensorrt` | `.engine` | `fp16`, `int8`, `fp32` | NVIDIA GPUs |
 
-Each target's runtime is installed the first time it is needed (see [Installation](/mayaku/installation/)).
+Each target's runtime is installed the first time it is needed (see [Installation](/docs/installation.md)).
 
 Choose a precision with `--precision`:
 
@@ -52,7 +53,7 @@ Without `--output`, the file is written next to the checkpoint with the target's
 1. Loads the checkpoint on the CPU and builds its deployment graph at the model's canvas size.
 2. Writes the file for the target and precision.
 3. Embeds the model's description in the file's metadata: class names, canvas, preprocessing, post-processing values, task settings, precision. This is why an exported file needs no config.
-4. **Checks the file.** It runs the exported file once in its runtime and compares the raw outputs with the PyTorch model on the same input. If they differ by more than the tolerance (0.1% RMS for fp32, 1% for fp16, 15% for int8), export fails with an error like `model.mlpackage: coreml fp16 outputs differ from the Torch model by 3.20% RMS (tolerance 1.0%)`. The file is not returned as a success.
+4. **Checks the file.** It runs the exported file once in its runtime and compares its raw outputs with the PyTorch model's on the same input. This catches a broken conversion, such as wrong weights or swapped outputs. A broken file fails export with an error, and the file is not returned as a success. The check is not an accuracy measure: int8 exports score within 0.3 AP of the fp32 model, for example 44.2 AP fp32 and 43.9 AP int8.
 
 The check is skipped, with the file still written, only when the target's runtime can't run on this machine: Core ML anywhere but macOS. TensorRT export always needs a CUDA GPU, both to build the engine and to check it.
 
@@ -66,14 +67,14 @@ path = predictor.export("onnx", "model.onnx")                 # default precisio
 path = predictor.export("coreml", "model_int8.mlpackage", precision="int8")
 ```
 
-`export(target="onnx", output=None, precision=None)` returns the path written. Without `output`, it writes `model.<extension>` in the current directory.
+`export(target="onnx", output=None, precision=None)` returns the path written. Without `output`, it writes `model.<extension>` in the current directory. An `output` without the target's extension gets it added: `export("openvino", "street")` writes `street.xml`.
 
 ## The exported graph
 
 The exported model contains only five operations: 1×1 and 3×3 convolutions, ReLU, addition, nearest-neighbor upsampling, and 3×3 max-pooling. There are no custom operators, attention or deformable convolutions, so any runtime that supports these ops can run it. Export asserts this on every ONNX file it writes.
 
 - **Fixed input size.** The input is one image (batch 1) at the model's canvas, `(1, 3, H, W)`. Find the canvas in `predictor.canvas` or in `canvas_hw` in the embedded metadata. `predictor.batch([...])` on an exported model runs the images one at a time.
-- **Input.** ONNX, OpenVINO and TensorRT take a float32 tensor named `images`, planar RGB, values scaled to 0–1, already letterboxed (see [Prediction](/mayaku/deployment/prediction/#preprocessing)). Core ML takes an 8-bit image and does the 1/255 scaling inside the model. These describe the graph itself; Mayaku's own predictors take BGR images and convert them for you.
+- **Input.** ONNX, OpenVINO and TensorRT take a float32 tensor named `images`, planar RGB, values scaled to 0–1, already letterboxed (see [Prediction](/docs/deployment/prediction.md#preprocessing)). Core ML takes an 8-bit image and does the 1/255 scaling inside the model. These describe the graph itself; Mayaku's own predictors take BGR images and convert them for you.
 - **Outputs are raw feature maps,** not boxes: per-level class logits (`cls0`, `cls1`, `cls2`) and box distributions (`box0`, `box1`, `box2`), plus the mask, keypoint or angle maps for those tasks. The sigmoid, box decoding, score threshold, NMS, mask assembly and keypoint refinement run on the host. Mayaku's predictors do this for you.
 
 ### Running without Mayaku
@@ -100,7 +101,7 @@ A TensorRT `.engine` written by Mayaku is not a plain engine file. Strip the hea
 
 ## int8
 
-Models are trained quantization-aware by default (`model.qat: true`, see [Training](/mayaku/data-and-training/training/#the-training-recipe)). Such a model has learned the value ranges of every layer, and int8 export writes exactly the network it was trained as. No calibration dataset is needed.
+Models are trained quantization-aware by default (`model.qat: true`, see [Training](/docs/data-and-training/training.md#the-training-recipe)). Such a model has learned the value ranges of every layer, and int8 export writes exactly the network it was trained as. No calibration dataset is needed.
 
 ```bash
 mayaku export onnx     best.pt --precision int8 --output model_int8.onnx
@@ -119,7 +120,8 @@ mayaku export coreml   best.pt --precision int8 --output model_int8.mlpackage
 ### ONNX
 
 - The default `fp32` graph is the portable choice, and OpenVINO and TensorRT exports are built from it.
-- `from_pretrained("model.onnx")` uses onnxruntime's CUDA provider when `onnxruntime-gpu` is installed and a GPU is available, otherwise the CPU.
+- An `int8` file stores its weights as int8, about a quarter of the fp32 file (street nano: 5.8 MB instead of 21.2 MB), and onnxruntime runs most of its convolutions as int8. It is faster in the browser (street nano at 800×800 on an i9-10900X, Chrome with onnxruntime-web: 121 ms instead of 150) and about as fast as fp32 on one CPU thread (131 ms against 127). On a many-core CPU the fp32 file is faster (nano, 20 threads: 26 ms against 63), and on an Intel CPU an OpenVINO int8 export is the fast option.
+- `from_pretrained("model.onnx")` uses onnxruntime's CUDA provider when `onnxruntime-gpu` is installed and a GPU is available, otherwise the CPU. An `onnxruntime-gpu` installed without its CUDA libraries would fall back to the CPU; Mayaku installs them the first time this happens, and warns if CUDA still does not load.
 
 ### Core ML
 

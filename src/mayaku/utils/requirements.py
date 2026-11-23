@@ -5,7 +5,9 @@ PyTorch inference need (ONNX included, since every export goes through it),
 and each runtime is installed by the call that first needs it -- exporting to
 its format or loading one of its artifacts (`pip_spec` says which package).
 Every install pins the installed torch and torchvision, so a runtime can never
-replace the user's torch build, and each install is printed. Set
+replace the user's torch build, and each install is printed. The install
+runs pip in this interpreter, or ``uv pip`` in an environment uv made without
+pip. Set
 ``MAYAKU_AUTOINSTALL=0`` to turn it off: a missing runtime then raises with the
 exact ``pip install`` command instead.
 """
@@ -15,14 +17,16 @@ from __future__ import annotations
 import contextlib
 import importlib
 import importlib.metadata
+import importlib.util
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from types import ModuleType
 
-__all__ = ["autoinstall_enabled", "pip_spec", "require"]
+__all__ = ["autoinstall_enabled", "install", "pip_spec", "require"]
 
 #: import name -> the oldest version mayaku runs with
 _MIN = {"onnxruntime": "1.17", "openvino": "2024.3", "coremltools": "8.0",
@@ -43,8 +47,10 @@ def pip_spec(name: str) -> str:
     if name == "onnxruntime":
         if not (cuda and torch.cuda.is_available() and platform.system() != "Darwin"):
             return f"onnxruntime>={floor}"
-        # its PyPI GPU wheels are built for CUDA 13 from 1.27, for CUDA 12 before
-        return "onnxruntime-gpu>=1.21,<1.27" if cuda <= 12 else "onnxruntime-gpu>=1.27"
+        # its PyPI GPU wheels are built for CUDA 13 from 1.27, for CUDA 12 before;
+        # the extras bring the CUDA libraries torch's wheels lack (cuRAND)
+        return ("onnxruntime-gpu[cuda,cudnn]>=1.21,<1.27" if cuda <= 12
+                else "onnxruntime-gpu[cuda,cudnn]>=1.27")
     if name == "tensorrt":
         if cuda is None:
             raise RuntimeError("TensorRT needs a CUDA build of torch; this one is "
@@ -78,25 +84,48 @@ def _pinned() -> list[str]:
     return pins
 
 
+def _installer() -> tuple[list[str], str]:
+    """The install command for this interpreter and how to show it: pip, or
+    ``uv pip`` where the environment has no pip (``uv venv`` makes none); no
+    command when neither is there."""
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install"], "pip install"
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "pip", "install", "--python", sys.executable], "uv pip install"
+    return [], "pip install"
+
+
+def install(spec: str, why: str) -> str | None:
+    """Install `spec` next to the pinned torch; None when it installed, else
+    the error message with the command to run (installing is turned off, or
+    failed). `why` starts the message."""
+    installer, shown = _installer()
+    command = f"{shown} '{spec}'"
+    if not autoinstall_enabled():
+        return (f"{why}; run: {command} "
+                "(MAYAKU_AUTOINSTALL=0 turned off installing it automatically)")
+    if not installer:
+        return f"{why} and this environment has neither pip nor uv to install it; run: {command}"
+    pins = _pinned()
+    print(f"[mayaku] installing {spec} (keeping {', '.join(pins)}); "
+          "set MAYAKU_AUTOINSTALL=0 to turn this off", file=sys.stderr, flush=True)
+    # the pins ride along as requirements: satisfied as installed, so the
+    # installer refuses any resolution that would replace them
+    result = subprocess.run([*installer, spec, *pins])
+    if result.returncode:
+        return f"installing {spec} failed (exit {result.returncode}); install it yourself: {command}"
+    return None
+
+
 def require(name: str) -> ModuleType:
     """Import the runtime `name` (a key of `_MIN`), installing it first when
     it is missing or older than mayaku supports."""
     if _satisfied(name):
         return importlib.import_module(name)
-    spec = pip_spec(name)
-    command = f"pip install '{spec}'"
-    if not autoinstall_enabled():
-        raise ImportError(f"{name} is not installed (or too old); run: {command} "
-                          "(MAYAKU_AUTOINSTALL=0 turned off installing it automatically)")
-    pins = _pinned()
-    print(f"[mayaku] installing {spec} (keeping {', '.join(pins)}); "
-          "set MAYAKU_AUTOINSTALL=0 to turn this off", file=sys.stderr, flush=True)
-    # the pins ride along as requirements: satisfied as installed, so pip
-    # refuses any resolution that would replace them
-    result = subprocess.run([sys.executable, "-m", "pip", "install", spec, *pins])
-    if result.returncode:
-        raise ImportError(f"installing {spec} failed (pip exit {result.returncode}); "
-                          f"install it yourself: {command}")
+    error = install(pip_spec(name), f"{name} is not installed (or too old)")
+    if error:
+        raise ImportError(error)
     importlib.invalidate_caches()
     # an older version imported before the install must not shadow the new one
     for mod in [m for m in sys.modules if m == name or m.startswith(name + ".")]:

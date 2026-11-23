@@ -34,6 +34,7 @@ from mayaku.model import Detector
 from mayaku.utils.requirements import require
 
 PRECISIONS = ("fp16", "int8", "fp32")
+REGRID_INT8 = False   # no zero point: int8 keeps the trained symmetric grid (`mayaku.model.quant`)
 
 
 _WORKSPACE = 1 << 30
@@ -63,7 +64,7 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) if strongly_typed else 0
     network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
-    with onnx_graph(model, canvas, int8=int8, batch=batch) as onnx:
+    with onnx_graph(model, canvas, int8=int8, batch=batch, regrid=REGRID_INT8) as onnx:
         if strongly_typed and precision != "fp32":
             onnx = _fp16_graph(onnx, canvas, batch)
         if not parser.parse(onnx.read_bytes()):

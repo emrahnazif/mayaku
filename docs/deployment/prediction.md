@@ -1,9 +1,10 @@
----
-title: Run predictions with a trained model
+# Run predictions with a trained model
+
+<!--
 summary: Load a checkpoint or exported file with from_pretrained, set the score threshold, and read Detections.
 label: Prediction
 keywords: mayaku, inference, prediction, from_pretrained, detections
----
+-->
 
 `mayaku.from_pretrained` loads any trained Mayaku model, whether a checkpoint, a hosted model name or an exported file, and returns a predictor. Call the predictor with an image to get the results in that image's pixel coordinates.
 
@@ -11,7 +12,7 @@ keywords: mayaku, inference, prediction, from_pretrained, detections
 from mayaku import from_pretrained
 
 predictor = from_pretrained("runs/mayaku-n-det/train/best.pt")
-det = predictor("photo.jpg", conf=0.25)
+det = predictor("photo.jpg")
 
 for box, score, label in zip(det.boxes.tolist(), det.scores.tolist(), det.labels.tolist()):
     print(predictor.class_names[label], f"{score:.2f}", [round(v) for v in box])
@@ -41,8 +42,8 @@ The file type is chosen by the extension. Every one of these is called the same 
 ## Calling the predictor
 
 ```python
-det = predictor(image, conf=None)            # one image -> Detections (or Classification)
-dets = predictor.batch([img1, img2], conf=None)   # several images in one pass -> list
+det = predictor(image, conf=None, decode="predict")            # one image -> Detections (or Classification)
+dets = predictor.batch([img1, img2], conf=None, decode="predict")   # several images in one pass -> list
 ```
 
 `image` is any of these:
@@ -57,25 +58,43 @@ dets = predictor.batch([img1, img2], conf=None)   # several images in one pass -
 
 ### The score threshold
 
-**The default threshold is very low: `0.001`.** It is the threshold the model was evaluated with, because COCO AP is measured over all detections. Called without `conf`, a predictor returns up to 300 detections per image, most with low scores. For an application, pass a threshold:
+A prediction keeps detections scoring at least the model's **prediction threshold**, removes a box that overlaps a higher-scoring box of the same class by more than **0.5** IoU (NMS), and gives each location at most its best class. The first prediction states these settings once as a Python warning. Pass `conf` to change the threshold for one call:
 
 ```python
-det = predictor("photo.jpg", conf=0.25)
+det = predictor("photo.jpg", conf=0.5)
 ```
 
-`mayaku predict` takes the same value as `--conf 0.25`.
+`mayaku predict` takes the same value as `--conf 0.5`.
 
-The other post-processing values are recorded in the model when it is trained (field `train.decode`, see [Configuration](/mayaku/reference/configuration/#decode-settings)):
+**The threshold is chosen when the model is trained.** At the end of training, the final weights are scored on the validation split, and the same pass measures precision and recall at every threshold from 0.1 to 0.7 in steps of 0.05. The checkpoint records the threshold with the best F1, the balance of precision and recall. Training logs the choice, for example `prediction threshold 0.25 (precision 0.806, recall 0.684, F1 0.740 on the validation split)`, and keeps it in the checkpoint as `predictor.sidecar["predict"]["conf"]`, with how it was chosen in `predictor.sidecar["predict_tuned"]`. Models whose scores are spread over many classes get a lower threshold (the Objects365 nano gets 0.2); confident fine-tuned models usually get 0.4 to 0.7. On the 100 RF100-VL datasets, the threshold picked on each validation split gave up 0.006 F1 on its test split against the best possible threshold, a fixed 0.4 gave up 0.008, and validation splits of only 100 to 500 objects still picked better than 0.4. Without a validation split, or with fewer than 50 validation objects, the threshold stays at **0.4**. If you prefer fewer false detections to more found objects, set a higher threshold yourself. A threshold you set in the config (`train.predict.conf`) is kept. `mayaku tune-predict` runs the same choice on an existing checkpoint (see [Command line](/docs/reference/cli.md#mayaku-tune-predict)).
 
-| Value | Default | Meaning |
-|---|---|---|
-| `conf` | `0.001` | Minimum score. You can override it on each call. |
-| `iou` | `0.7` | Overlap above which NMS removes the lower-scoring of two same-class boxes. |
-| `max_det` | `300` | Maximum detections per image. |
-| `topk` | `1000` | Candidates kept before NMS. |
-| `multi_label` | `true` | An object may be reported once per class that scores above `conf`, so the same box can appear with two different classes. With `false`, each location gives at most its best class. |
+The chosen value reflects the validation split. Missing labels in it count as false detections and lower the threshold; a split unlike your footage may suit a different one.
 
-They are stored in `predictor.sidecar["decode"]`. Changing a value in that dict changes the predictor's later calls, for example `predictor.sidecar["decode"]["max_det"] = 50`.
+A higher threshold gives fewer false detections and misses more real objects. On the street models' validation set, 0.25 finds 68% of the objects with 81% of the detections correct; 0.4 finds 61% with 90% correct; 0.5 finds 55% with 94% correct. Objects that score near the threshold also appear and disappear more between video frames. A tracker that uses low-scoring detections to keep its tracks alive, such as ByteTrack, needs a lower threshold, for example `conf=0.1`.
+
+NMS at 0.5 removes almost every second box on the same object (94% of them on the street models). Its cost is in crowds: two people side by side or a row of parked cars overlap enough that the lower-scoring one is sometimes removed, about 6% of such overlapping objects.
+
+### Prediction and evaluation post-processing
+
+A model records two sets of post-processing values. Predictions use one; evaluation (`mayaku eval`, and the evaluation during training) uses the other, because COCO AP is measured over every detection: it keeps everything down to a score of 0.001 and lets one box be reported under several classes. In an application those values return up to 300 detections per image, mostly low-scoring, often several boxes with different classes on one object. Pass `decode="eval"` to get exactly the evaluation's output:
+
+```python
+det = predictor("photo.jpg", decode="eval")
+```
+
+| Value | Prediction (`train.predict`) | Evaluation (`train.decode`) | Meaning |
+|---|---|---|---|
+| `conf` | chosen at the end of training, else `0.4` | `0.001` | Minimum score. You can override it on each call with `conf=`. |
+| `iou` | `0.5` | `0.7` | Overlap above which NMS removes the lower-scoring of two same-class boxes. |
+| `max_det` | `300` | `300` | Maximum detections per image. |
+| `topk` | `1000` | `1000` | Candidates kept before NMS. |
+| `multi_label` | `false` | `true` | An object may be reported once per class that scores above `conf`, so the same box can appear with two different classes. With `false`, each location gives at most its best class. |
+
+Set a model's own prediction values when you train it (see [Configuration](/docs/reference/configuration.md#decode-settings)). They are in `predictor.sidecar["predict"]`, and the evaluation's in `predictor.sidecar["decode"]`. Checkpoints saved before prediction values existed use the prediction defaults above.
+
+AP computed from predictions is lower than the model's real AP, because predictions leave out the low-scoring detections that AP counts: the street nano measures 43.5 AP with `decode="eval"` and 34.6 from its predictions at 0.4. Use `mayaku eval`, or `decode="eval"` when you compute metrics yourself.
+
+Post-processing runs on the GPU when the model runs on CUDA, and on the CPU otherwise, including on Apple GPUs (MPS), where the CPU is several times faster for this work.
 
 ## Detections
 
@@ -92,7 +111,7 @@ Detection, segmentation, keypoint and oriented-box models return a `Detections` 
 
 `len(det)` is the number of detections. Row `i` of every field describes the same object.
 
-Details on each optional field are on the task pages: [masks](/mayaku/more-tasks/segmentation/#predict), [keypoints](/mayaku/more-tasks/keypoints/#predict), [oriented boxes](/mayaku/more-tasks/oriented-boxes/#predict).
+Details on each optional field are on the task pages: [masks](/docs/more-tasks/segmentation.md#predict), [keypoints](/docs/more-tasks/keypoints.md#predict), [oriented boxes](/docs/more-tasks/oriented-boxes.md#predict).
 
 ## Classification
 
@@ -104,7 +123,7 @@ A classifier returns a `Classification` for each image:
 | `label` | Index of the most likely class |
 | `top(k=5)` | List of `(class_index, probability)` pairs, best first |
 
-`conf` has no effect on a classifier. See [Image classification](/mayaku/more-tasks/classification/#predict).
+`conf` has no effect on a classifier. See [Image classification](/docs/more-tasks/classification.md#predict).
 
 ## Predictor attributes
 
@@ -127,7 +146,7 @@ while True:
     ok, frame = cap.read()
     if not ok:
         break
-    det = predictor(frame, conf=0.3)                   # OpenCV frames are BGR, as expected
+    det = predictor(frame)                             # OpenCV frames are BGR, as expected
     for (x1, y1, x2, y2), label in zip(det.boxes.int().tolist(), det.labels.tolist()):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, predictor.class_names[label], (x1, y1 - 4),

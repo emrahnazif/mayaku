@@ -97,7 +97,7 @@ def test_cli(run, data, tmp_path) -> None:
     image = str(data["val_images"] / "000.jpg")
     res = cli.invoke(app, ["predict", weights, image, "--conf", "0.01", "--device", "cpu"])
     assert res.exit_code == 0, res.output
-    dets = json.loads(res.output)["detections"]
+    dets = json.loads(res.stdout)["detections"]
     assert dets and set(dets[0]) == {"class_id", "class", "score", "box_xyxy"}
 
     res = cli.invoke(app, ["eval", weights, "--annotations", data["val_annotations"],
@@ -112,3 +112,48 @@ def test_cli(run, data, tmp_path) -> None:
     res = cli.invoke(app, ["train", "--annotations", data["train_annotations"],
                            "--images", str(data["train_images"]), "--set", "train.nope=1"])
     assert res.exit_code != 0
+
+
+def test_tune_predict_records_the_threshold(run, data, tmp_path, monkeypatch) -> None:
+    """`tune_predict` writes the chosen threshold into a copy of the
+    checkpoint (the original keeps its own); a split too small to choose
+    from writes nothing; an exported artifact is refused."""
+    from mayaku.engine import evaluation as evlib
+    from mayaku.inference.decode import PREDICT, predict_decode
+
+    weights, out = run["final_weights"], tmp_path / "tuned.pt"
+    kw = dict(annotations=data["val_annotations"], images=data["val_images"], device="cpu",
+              log=lambda *_: None)
+    m = mayaku.tune_predict(weights, output=out, **kw)        # 6 images: too few objects
+    assert "predict_conf" not in m and not out.exists()
+    monkeypatch.setattr(evlib, "OPERATING_MIN_GT", 1)
+    m = mayaku.tune_predict(weights, output=out, **kw)
+    assert m["predict_conf"] in evlib.OPERATING_GRID
+    tuned = mayaku.from_pretrained(out, device="cpu")
+    assert predict_decode(tuned.sidecar).conf == m["predict_conf"]
+    assert predict_decode(tuned.sidecar).iou == PREDICT.iou
+    assert tuned.sidecar["predict_tuned"]["predict_f1"] == pytest.approx(m["predict_f1"])
+    assert predict_decode(mayaku.from_pretrained(weights, device="cpu").sidecar) == PREDICT
+    (tmp_path / "m.onnx").write_bytes(b"")
+    with pytest.raises(ValueError, match="checkpoint"):
+        mayaku.tune_predict(tmp_path / "m.onnx", **kw)
+
+
+def test_training_records_the_threshold_its_validation_picks(data, tmp_path, monkeypatch) -> None:
+    """The end-of-run evaluation picks the prediction threshold and writes it
+    into the final weights; a config that sets `train.predict.conf` keeps it."""
+    from mayaku.engine import evaluation as evlib
+    from mayaku.inference.decode import predict_decode
+
+    monkeypatch.setattr(evlib, "OPERATING_MIN_GT", 1)
+    lines: list[str] = []
+    res = mayaku.train(**data, output_dir=tmp_path / "a", size_budget=96, num_epochs=1,
+                       overrides=FAST, device="cpu", log=lines.append)
+    conf = res["metrics"]["predict_conf"]
+    assert predict_decode(mayaku.from_pretrained(res["final_weights"], device="cpu").sidecar).conf == conf
+    assert any(f"prediction threshold {conf:g}" in line for line in lines)
+    own = {**FAST, "train": {**FAST["train"], "predict": {"conf": 0.55}}}
+    res = mayaku.train(**data, output_dir=tmp_path / "b", size_budget=96, num_epochs=1,
+                       overrides=own, device="cpu", log=lambda *_: None)
+    assert "predict_conf" not in res["metrics"]
+    assert predict_decode(mayaku.from_pretrained(res["final_weights"], device="cpu").sidecar).conf == 0.55

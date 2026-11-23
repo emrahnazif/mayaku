@@ -44,9 +44,9 @@ from mayaku.data.canvas import multi_scale_canvases
 from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
 from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, ranked_metric, summary
 from mayaku.engine.loss import ClassifyLoss, DetectionLoss
-from mayaku.inference.decode import DEPLOY, Decode
+from mayaku.inference.decode import DEPLOY, PREDICT, Decode, PredictDecode
 from mayaku.model.quant import fake_quant_disabled, is_qat, observers, ranges_frozen
-from mayaku.utils.checkpoint import SIDECAR_KEY, check_sidecar, save_checkpoint
+from mayaku.utils.checkpoint import SIDECAR_KEY, atomic_save, check_sidecar, save_checkpoint
 
 STATE = "state.pt"   # the resumable training state `train` writes to `out`
 
@@ -125,7 +125,8 @@ class Recipe:
     sync_bn: bool = True
     aug: Augment = DEFAULT_AUG
     final_aug: Augment = CLEAN_AUG
-    decode: Decode = DEPLOY
+    decode: Decode = DEPLOY         # evaluation (COCO AP), recorded in the checkpoint
+    predict: PredictDecode = PREDICT  # what a prediction call uses, recorded alongside
 
     def __post_init__(self):
         assert self.optimizer in ("sgd", "adamw", "musgd"), self.optimizer
@@ -593,10 +594,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             state = {"epoch": epoch, "model": model.state_dict(), "ema": ema.model.state_dict(),
                      "ema_updates": ema.updates, "optimizer": opt.state_dict(),
                      "scaler": scaler.state_dict(), "best": best, SIDECAR_KEY: sidecar}
-            # written aside and renamed, so a crash mid-save keeps the last good one
-            path = os.path.join(out, STATE)
-            torch.save(state, path + ".tmp")
-            os.replace(path + ".tmp", path)
+            atomic_save(state, os.path.join(out, STATE))
         synchronize()
     if not main:
         return None, None, []

@@ -1,11 +1,12 @@
----
-title: Train a model with mayaku.train
+# Train a model with mayaku.train
+
+<!--
 summary: Warm starts, settings, input size, auto-config, the run directory, resuming and multi-GPU training with mayaku.train.
 label: Training
 keywords: mayaku, training, fine-tuning, auto-config, multi-gpu
----
+-->
 
-`mayaku.train` (command line: `mayaku train`) trains every model type: detection, instance segmentation, keypoints, oriented boxes and classification. This page covers what all of them share. The task pages cover what differs: [segmentation](/mayaku/more-tasks/segmentation/), [keypoints](/mayaku/more-tasks/keypoints/), [oriented boxes](/mayaku/more-tasks/oriented-boxes/), [classification](/mayaku/more-tasks/classification/).
+`mayaku.train` (command line: `mayaku train`) trains every model type: detection, instance segmentation, keypoints, oriented boxes and classification. This page covers what all of them share. The task pages cover what differs: [segmentation](/docs/more-tasks/segmentation.md), [keypoints](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md), [classification](/docs/more-tasks/classification.md).
 
 ## The basic call
 
@@ -38,7 +39,7 @@ Training starts from pretrained weights, from a config, or from both:
 | `config` and `weights` | The config | The checkpoint, which must fit the config |
 | Neither | The defaults: size `n`, plain detector | Random (training from scratch) |
 
-`weights` is a hosted model name such as `mayaku-n-det` (see [Models](/mayaku/data-and-training/models/)) or the path to any `.pt` or `.pth` checkpoint Mayaku wrote, including the `best.pt` of an earlier run.
+`weights` is a hosted model name such as `mayaku-n-det` (see [Models](/docs/data-and-training/models.md)) or the path to any `.pt` or `.pth` checkpoint Mayaku wrote, including the `best.pt` of an earlier run.
 
 **Fine-tuning from pretrained weights is the recommended default.** It converges in fewer epochs and reaches higher accuracy on small datasets than training from scratch.
 
@@ -49,7 +50,7 @@ When you start from a checkpoint, the weights are loaded into the model your con
 - **Class count.** It may differ from the checkpoint's. The class layer is re-initialized for your classes, and the log says `classifier re-initialised for N classes`.
 - **Heads.** Masks, keypoints and oriented boxes may be added to or removed from a detector's weights. For example, `mayaku-n-det` with `--set model.seg=true` trains a segmentation model whose backbone and box head start pretrained and whose mask branch starts fresh.
 - **Size.** It cannot change. `mayaku-n-det` loads only into an `n` model. Setting `model.tier=s` with `n` weights fails with `state dict does not fit this model`.
-- **Keypoint count.** It cannot change from the checkpoint's. To train a different keypoint count, start from the detector weights (`mayaku-n-det`). See [Keypoint detection](/mayaku/more-tasks/keypoints/).
+- **Keypoint count.** It cannot change from the checkpoint's. To train a different keypoint count, start from the detector weights (`mayaku-n-det`). See [Keypoint detection](/docs/more-tasks/keypoints.md).
 
 ### Training from scratch
 
@@ -65,7 +66,7 @@ A from-scratch run uses the full recipe: 125 epochs, with a longer warmup for th
 
 ## Changing settings
 
-Every setting is a field of the config (see [Configuration](/mayaku/reference/configuration/) for all of them). There are three ways to set a field, and they combine.
+Every setting is a field of the config (see [Configuration](/docs/reference/configuration.md) for all of them). There are three ways to set a field, and they combine.
 
 **Command line**, repeatable `--set dotted.path=value` (the value is parsed as YAML, so `true`, `0.005`, `null` and `[640, 640]` get their types):
 
@@ -183,11 +184,11 @@ With `val_annotations` and `val_images` (`--val-annotations` and `--val-images`)
   ```text
   epoch  41  box 0.812 cls 0.655 dfl 0.901  AP 0.6123  AP50 0.8540  AP75 0.6702  S 0.3120  M 0.5874  L 0.7012
   ```
-- `best.pt` is kept, and after training it is scored once more through the same code path a deployment uses. The result goes to `eval/metrics.json` and `result["metrics"]`.
+- `best.pt` is kept, and after training it is scored once more through the same code path a deployment uses. The result goes to `eval/metrics.json` and `result["metrics"]`. The same pass chooses the prediction threshold and writes it into `best.pt` (`predict_conf` in the metrics; see [Prediction](/docs/deployment/prediction.md#the-score-threshold)).
 
 Without a validation split, the run trains without scoring, writes no `best.pt`, and `last.pt` is the result. `result["metrics"]` is `None`.
 
-`S`, `M` and `L` are AP on small, medium and large objects. `-1.0` means the split has no objects of that size. See [Evaluation](/mayaku/deployment/evaluation/).
+`S`, `M` and `L` are AP on small, medium and large objects. `-1.0` means the split has no objects of that size. See [Evaluation](/docs/deployment/evaluation.md).
 
 ## The result
 
@@ -222,7 +223,7 @@ The defaults are the recipe Mayaku is tuned with. The fields you are most likely
 
 **The final stage.** The last `train.final_frac` of the epochs (16% from scratch, 20% when fine-tuning) train without mosaic or scale and translate jitter, on images that look like the ones the model will see in use. The log announces it: `epoch 80: mosaic off, final stage ...`.
 
-**Quantization-aware training (QAT)** is on by default (`model.qat: true`). The model learns weights that keep their accuracy in int8, so the same checkpoint exports to float or int8 (see [Export](/mayaku/deployment/export/#int8)). Each evaluation scores the whole validation split twice, in fp32 and in simulated int8, and logs the difference:
+**Quantization-aware training (QAT)** is on by default (`model.qat: true`). The model learns weights that keep their accuracy in int8, so the same checkpoint exports to float or int8 (see [Export](/docs/deployment/export.md#int8)). Each evaluation scores the whole validation split twice, in fp32 and in simulated int8, and logs the difference:
 
 ```text
 epoch  41  ...  AP 0.6123 ...  int8 vs float -0.3 AP
@@ -230,7 +231,7 @@ epoch  41  ...  AP 0.6123 ...  int8 vs float -0.3 AP
 
 The logged metrics are the fp32 ones, and `log.jsonl` also records the int8 score of the ranked metric (`AP_int8`, `segm_AP_int8` or `kpt_AP_int8`). `best.pt` is chosen on the lower of the two scores (see [The run directory](#the-run-directory)). The line ends with `WARNING` when int8 loses more than 1 AP point. Turn QAT off with `--set model.qat=false` if you will only ever deploy in float.
 
-All recipe fields are listed in [Configuration](/mayaku/reference/configuration/#train).
+All recipe fields are listed in [Configuration](/docs/reference/configuration.md#train).
 
 ## Resuming
 

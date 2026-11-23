@@ -15,6 +15,9 @@ the structural five-op fp32 graph (`fake_quant_disabled`) or the explicit
 int8 one (`qdq_export`: the trained ranges as quantize / dequantize ops);
 `deploy_mode` picks between them.
 
+An export can give a one-sided range the whole int8 grid instead of the
+trained symmetric one (`regrid`, `ActFakeQuant.export_qparams`).
+
 The observed ranges are statistics of the weights they were observed with,
 like BatchNorm's running statistics. A trained model keeps its trained
 ranges: the network learned to work within them, and min / max over clean
@@ -141,6 +144,19 @@ class ActFakeQuant(nn.Module):
         mx = self.mx.clamp(min=0.0)
         scale = ((mx - mn) / (self.qmax - self.qmin)).clamp_min(SCALE_FLOOR)
         zp = torch.round(self.qmin - mn / scale).clamp(self.qmin, self.qmax)
+        return scale, zp
+
+    def export_qparams(self, regrid=False):
+        """(scale, zero point) an int8 export uses: `qparams`, or with
+        `regrid` the whole int8 grid for a symmetric range that is never
+        negative (`mn` >= 0: a ReLU output, most of the network), which the
+        symmetric grid covers with its levels 0..127 only. Half the trained
+        step and zero point -128: level 2k - 128 is the trained level k, so the
+        weights and ranges stay as trained and only the rounding gets finer.
+        A runtime without zero points (TensorRT) needs `regrid` False."""
+        scale, zp = self.qparams()
+        if regrid and self.symmetric and float(self.mn) >= 0:
+            return scale / 2, torch.full_like(zp, self.qmin)
         return scale, zp
 
 
@@ -352,15 +368,16 @@ def fake_quant_disabled(model):
 
 
 @contextlib.contextmanager
-def qdq_export(model):
+def qdq_export(model, regrid=False):
     """Inside the block every QuantConv2d in `model` runs the explicit int8
     graph (`QuantConv2d._qdq_forward`), and every observed ResidualQuant
     quantizes its operand the same way, so an ONNX export carries the trained
-    ranges as QuantizeLinear / DequantizeLinear pairs. Use on a fused model."""
+    ranges as QuantizeLinear / DequantizeLinear pairs (`regrid`: see
+    `ActFakeQuant.export_qparams`). Use on a fused model."""
     # an unobserved residual operand stays a plain add
     quant = [m for m in _quant_modules(model) if isinstance(m, QuantConv2d) or m.observed]
     for m in quant:
-        scale, zp = m.act_fq.qparams()
+        scale, zp = m.act_fq.export_qparams(regrid)
         m.qdq = (float(scale), int(zp)) + ((_weight_scales(m.weight),) if isinstance(m, QuantConv2d) else ())
     try:
         yield model
@@ -369,10 +386,10 @@ def qdq_export(model):
             m.qdq = None
 
 
-def deploy_mode(model, int8=False):
-    """The graph an export traces: the explicit int8 graph (`qdq_export`) or
-    the structural fp32 one (`fake_quant_disabled`)."""
-    return qdq_export(model) if int8 else fake_quant_disabled(model)
+def deploy_mode(model, int8=False, regrid=False):
+    """The graph an export traces: the explicit int8 graph (`qdq_export`,
+    with `regrid`) or the structural fp32 one (`fake_quant_disabled`)."""
+    return qdq_export(model, regrid) if int8 else fake_quant_disabled(model)
 
 
 @contextlib.contextmanager

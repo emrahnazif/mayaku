@@ -141,6 +141,27 @@ def test_symmetric_grid_is_centred_on_zero() -> None:
     assert float(z) == -128.0 and abs(float(s) - 2.54 / 255) < 1e-7
 
 
+def test_export_regrid_contains_the_trained_grid() -> None:
+    """A one-sided symmetric range exports with half the step and zero point
+    -128, so every trained level is a level of the export grid and values
+    round at least as finely; a range that goes negative, and `regrid` False,
+    keep the trained grid."""
+    one, two = ActFakeQuant(), ActFakeQuant()
+    one.mn.fill_(0.0)
+    one.mx.fill_(2.54)
+    two.mn.fill_(-1.0)
+    two.mx.fill_(2.54)
+    s, z = one.export_qparams(regrid=True)
+    assert float(z) == -128.0 and abs(float(s) - 0.01) < 1e-7
+    assert one.export_qparams() == one.qparams()
+    assert two.export_qparams(regrid=True) == two.qparams()
+    x = torch.linspace(0.0, 2.54, 2001)
+    trained = torch.fake_quantize_per_tensor_affine(x, 0.02, 0, -128, 127)
+    exported = torch.fake_quantize_per_tensor_affine(x, float(s), int(z), -128, 127)
+    assert torch.equal(torch.fake_quantize_per_tensor_affine(trained, float(s), int(z), -128, 127), trained)
+    assert ((exported - x).abs() <= (trained - x).abs() + 1e-6).all()
+
+
 def test_default_model_quantizes_symmetric_and_records_it() -> None:
     from mayaku.model.quant import activation_scheme
     assert activation_scheme(_qat_model()) == "symmetric"

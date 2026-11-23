@@ -4,15 +4,20 @@
 [![PyPI](https://img.shields.io/pypi/v/mayaku)](https://pypi.org/project/mayaku/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/emrahnazif/mayaku/blob/main/LICENSE)
 
+## Mayaku-Street
+![Mayaku street models detecting and segmenting objects in street footage](https://raw.githubusercontent.com/emrahnazif/mayaku/main/docs/assets/mayaku-street.webp)
+
 **The most accurate nano detector to fine-tune on your own data.** Mayaku is a real-time
 detector family built for the job most people actually have: take a pretrained model, train
 it on a few hundred images of your own objects, and ship it to whatever hardware you have.
+For common jobs there are also ready-to-use models you run without training (see
+[Ready-to-use models](#ready-to-use-models)).
 
 Pure PyTorch, no custom CUDA kernels, Apache 2.0. One `pip install` trains on CUDA, Apple
 Silicon or CPU, and every model exports to a graph of just five operations that runs on
 any runtime, including true int8 on NPUs.
 
-![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_vs_latency.png)
+![RF100-VL mean AP against end-to-end latency on Apple M1 Max and RTX 3060: mayaku-n at 800 px 58.9 AP, YOLO26n at 640 px 54.8, RF-DETR nano at 384 px 57.4](https://raw.githubusercontent.com/emrahnazif/mayaku/main/docs/assets/rf100_ap_vs_latency.png)
 
 - **Highest fine-tune AP at nano size.** Across all 100 datasets of
   [RF100-VL](https://rf100-vl.org/), mayaku-n averages **58.9 AP**: ahead of RF-DETR nano
@@ -35,6 +40,23 @@ installed the first time you export to it or load one of its files, matched to y
 never replacing your torch.
 
 ## Quick start
+
+Mayaku has two kinds of models. **Base models** (`mayaku-n-det`, `mayaku-m-seg`...) are
+pretrained on Objects365 as a starting point for training on your data; they are not built to
+be used as they are. **Ready-to-use models** (`mayaku-m-det-street`...) are finished models for
+one kind of scene.
+
+### Use a ready-to-use model
+
+```python
+from mayaku import from_pretrained
+
+predictor = from_pretrained("mayaku-m-det-street")   # 22 road and street classes
+det = predictor("crossing.jpg")
+print(det.boxes, det.scores, det.labels)
+```
+
+### Fine-tune on your own data
 
 Fine-tune on a COCO-format dataset. The pretrained weights download on first use, the
 classifier resizes to your classes, and the schedule, canvas and class count are set from
@@ -66,6 +88,34 @@ mayaku predict runs/mayaku-n-det/train/best.pt photo.jpg
 mayaku export onnx runs/mayaku-n-det/train/best.pt --output model.onnx
 ```
 
+## Ready-to-use models
+
+Finished models for one kind of scene: download by name and predict. Each has its own page with
+its classes, accuracy, speed and known limitations.
+
+| Made for | Models | Details |
+|---|---|---|
+| Road and street scenes, dashcam to aerial, 22 classes | `mayaku-n-det-street`, `mayaku-n-seg-street`, `mayaku-m-det-street`, `mayaku-m-seg-street` | [Street models](https://emrah.fr/mayaku/ready-to-use/street/) |
+
+### Street
+
+People, faces, helmets, cars, trucks, buses, emergency vehicles, bicycles, e-scooters,
+license plates, traffic lights, signs and more, from dashcam, CCTV, drone and straight-down
+aerial views. On the 10 classes they share with COCO, against COCO-trained models at their
+default input size (box AP@[.50:.95], car and truck merged):
+
+| Model | Params | Street validation set | COCO val2017 | RTX 3060 fp16, network |
+|---|---:|---:|---:|---:|
+| **mayaku-m-det-street** | 32.4M | **65.3** | 57.1 | 5.36 ms |
+| RF-DETR large | 33.9M | 56.3 | **61.8** | 5.42 ms |
+| YOLO26l | 26.3M | 53.2 | 60.4 | 4.19 ms |
+| **mayaku-n-det-street** | 5.2M | 52.2 | 51.2 | 1.49 ms |
+
+Each model wins on its own ground: the street models on street scenes (17,712 images), the
+COCO models on COCO's images and labels, which the street models never trained on. On drone and
+aerial images the COCO models score 3 to 17 AP, the street medium 23 to 25. Over all 22 classes
+the street medium scores 56.8 box AP and 45.5 mask AP, the nano 43.9 and 35.2.
+
 ## Fine-tuning benchmark: RF100-VL
 
 RF100-VL is 100 real-world datasets (aerial, medical, industrial, documents, sports,
@@ -82,7 +132,7 @@ checkpoint is scored by the same pycocotools evaluator on each dataset's validat
 
 The gain is largest on small objects, where nano detectors usually struggle:
 
-![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/assets/rf100_ap_by_size.png)
+![RF100-VL AP by object size for mayaku-n, RF-DETR nano, YOLO26s and YOLO26n](https://raw.githubusercontent.com/emrahnazif/mayaku/main/docs/assets/rf100_ap_by_size.png)
 
 > **Protocol.** AP is COCO AP@[.50:.95] (pycocotools, `maxDets=100`) on each dataset's
 > validation split, at the best epoch on that split, averaged over all 100 datasets.
@@ -134,6 +184,13 @@ frames from `cv2.VideoCapture` go in as they are, with no conversion.
 
 ## Models
 
+Which one to start from: if a [ready-to-use model](#ready-to-use-models) covers your objects and
+cameras, use it as it is. If one comes close (your own classes, an unusual camera), fine-tune it.
+Otherwise fine-tune a base model.
+
+**Base models: fine-tune these on your data.** Pretrained on Objects365; detection and
+segmentation train from COCO JSON.
+
 | Name | Task | Params | GMACs (640) | Status |
 |---|---|---:|---:|---|
 | `mayaku-n-det` | detection | 5.2M | 6.7 | released |
@@ -141,8 +198,17 @@ frames from `cv2.VideoCapture` go in as they are, with no conversion.
 | `mayaku-m-det` | detection | 32.4M | 46.3 | released |
 | `mayaku-m-seg` | detection + instance masks | 32.7M | 47.3 | released |
 
-All are pretrained on Objects365; detection and segmentation read COCO JSON.
-`mayaku download --list` shows what is hosted. 
+`mayaku download --list` shows what is hosted.
+
+## Documentation
+
+The documentation is at [emrah.fr/mayaku](https://emrah.fr/mayaku/). The same pages come with the
+package, matching the installed version, so a coding agent can read them offline. `llms.txt` in
+that folder lists every page. This command prints the folder:
+
+```bash
+python -c "import mayaku, os; print(os.path.dirname(mayaku.__file__) + '/docs')"
+```
 
 ## License
 
