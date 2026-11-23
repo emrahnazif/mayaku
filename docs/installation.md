@@ -38,12 +38,12 @@ On Apple Silicon the default macOS wheels already include MPS support.
 
 | Target | Installed on first use | Notes |
 |---|---|---|
-| ONNX | `onnxruntime-gpu` matching your torch's CUDA build with an NVIDIA GPU, else `onnxruntime` | Export runs the file once to check it, so exporting needs it too. |
+| ONNX | `onnxruntime-gpu[cuda,cudnn]` matching your torch's CUDA build with an NVIDIA GPU, else `onnxruntime` | Export runs the file once to check it, so exporting needs it too. The extras bring the CUDA libraries torch does not install. |
 | Core ML | `coremltools` | The `.mlpackage` can be written on any OS, but it is only checked and run on macOS. |
 | OpenVINO | `openvino` | Intel CPUs, integrated GPUs and NPUs. |
 | TensorRT | `tensorrt-cu12` (or `-cu13`) 10.x, matching your torch's CUDA build | Linux with an NVIDIA GPU. A TensorRT 11 you installed yourself is used as is; it needs `nvidia-modelopt[onnx]` (torch 2.8 or newer). |
 
-Your installed `torch` and `torchvision` are pinned during every such install, so they are never replaced. On an older NVIDIA driver, install the torch build that matches it first (from [pytorch.org](https://pytorch.org/get-started/locally/)); mayaku then picks TensorRT to match.
+The install uses pip, or `uv pip` in an environment made by `uv venv`, which has no pip. Your installed `torch` and `torchvision` are pinned during every such install, so they are never replaced. On an older NVIDIA driver, install the torch build that matches it first (from [pytorch.org](https://pytorch.org/get-started/locally/)); mayaku then picks TensorRT to match.
 
 To install runtimes yourself (offline machines, locked environments), set `MAYAKU_AUTOINSTALL=0`. A missing runtime then fails with the exact `pip install` command.
 

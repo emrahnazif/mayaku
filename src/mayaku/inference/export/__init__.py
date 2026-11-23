@@ -90,8 +90,9 @@ _PARITY_DEVICE = {"coreml": "auto"}
 def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str | Path,
            precision: str | None = None) -> Path:
     """Write `model` (a trained `Detector`, left untouched) as a `target`
-    artifact at `path` with `sidecar` embedded; `precision` defaults to the
-    target's first. Raises if the artifact's raw maps disagree with the Torch
+    artifact at `path` with `sidecar` embedded (the target's extension is
+    added when `path` has none); `precision` defaults to the target's first;
+    returns the path written. Raises if the artifact's raw maps disagree with the Torch
     model's. Parity is skipped, with the artifact still written, only where
     its runtime cannot run on this host (Core ML off macOS)."""
     if target not in TARGETS:
@@ -102,7 +103,7 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
         raise ValueError(f"{target} exports {', '.join(t.precisions)}, not {precision}")
     if precision == "int8" and not sidecar["quant"]["qat"]:
         raise ValueError("int8 needs a quantization-aware model (train it with model.qat)")
-    path, canvas = Path(path), tuple(sidecar["canvas_hw"])
+    path, canvas = _with_suffix(Path(path), target), tuple(sidecar["canvas_hw"])
     m = model.for_deploy().cpu()
     sidecar = {**sidecar, "export": {"target": target, "precision": precision}}
     if target != "tensorrt" or torch.cuda.is_available():   # else `write` explains
@@ -115,6 +116,19 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
         raise RuntimeError(f"{path}: {target} {precision} outputs differ from the Torch model "
                            f"by {err:.2%} RMS (tolerance {_TOLERANCE[precision]:.1%})")
     return path
+
+
+def _with_suffix(path: Path, target: str) -> Path:
+    """`path` with the target's extension added when it has none of its own,
+    so the artifact can be loaded back by its suffix; another target's
+    extension is a mistake and raises."""
+    other = SUFFIX_TO_TARGET.get(path.suffix.lower())
+    if other == target:
+        return path
+    if other:
+        raise ValueError(f"{path}: a {target} export is written as {TARGETS[target].suffix}, "
+                         f"not {path.suffix} (the {other} extension)")
+    return path.with_name(path.name + TARGETS[target].suffix)
 
 
 class Session(Protocol):

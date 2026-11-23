@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import sys
 import warnings
 
 import pytest
@@ -24,7 +25,7 @@ from mayaku.inference.decode import (
     host_side,
     predict_decode,
 )
-from mayaku.inference.export import TARGETS, export, open_session
+from mayaku.inference.export import TARGETS, _with_suffix, export, open_session
 from mayaku.inference.export.metadata import embed_sidecar, read_sidecar, strip_tensorrt_header
 from mayaku.inference.preprocess import letterbox_batch
 from mayaku.model.quant import qdq_export
@@ -264,9 +265,62 @@ def test_export_refuses_what_a_target_or_model_cannot_do(predictor, tmp_path) ->
         predictor.export("onnx", tmp_path / "m.onnx", "fp16")
     with pytest.raises(ValueError, match="unknown export target"):
         predictor.export("tflite", tmp_path / "m.tflite")
+    with pytest.raises(ValueError, match=r"written as \.onnx, not \.xml"):
+        predictor.export("onnx", tmp_path / "m.xml")
     plain = {**predictor.sidecar, "quant": {**predictor.sidecar["quant"], "qat": False}}
     with pytest.raises(ValueError, match="quantization-aware"):
         export(predictor.model, plain, "onnx", tmp_path / "m.onnx", "int8")
+
+
+def test_export_adds_the_target_extension(tmp_path) -> None:
+    """A name without the target's extension still gives a file that loads
+    back by its suffix."""
+    assert _with_suffix(tmp_path / "street.v2", "onnx") == tmp_path / "street.v2.onnx"
+    assert _with_suffix(tmp_path / "street", "openvino") == tmp_path / "street.xml"
+    assert _with_suffix(tmp_path / "street.ONNX", "onnx") == tmp_path / "street.ONNX"
+
+
+def test_onnx_on_cuda_loads_its_libraries_and_repairs_a_cpu_fallback(monkeypatch) -> None:
+    """onnxruntime-gpu finds the CUDA libraries of their pip packages only
+    when preloaded, and one installed without them (cuRAND, which torch's
+    wheels lack) silently runs on the CPU: the session installs them once and
+    retries, and says so when that does not help."""
+    import types
+
+    from mayaku.inference.export import onnx as ox
+
+    calls: list[str] = []
+    cuda_loads = [False, True]                 # the first session falls back, the retry runs
+
+    class Sess:
+        def __init__(self, path, options, providers) -> None:
+            calls.append("session")
+            ok = "CUDAExecutionProvider" in providers and cuda_loads.pop(0)
+            self.providers = providers if ok else ["CPUExecutionProvider"]
+
+        def get_providers(self) -> list[str]:
+            return self.providers
+
+        def get_inputs(self) -> list:
+            return [types.SimpleNamespace(name="x", shape=[1, 3, 64, 64])]
+
+    ort = types.SimpleNamespace(
+        get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        preload_dlls=lambda: calls.append("preload"), SessionOptions=types.SimpleNamespace,
+        InferenceSession=Sess)
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    monkeypatch.setattr(ox, "pip_spec", lambda name: "onnxruntime-gpu[cuda,cudnn]>=1.27")
+    monkeypatch.setattr(ox, "install", lambda spec, why: calls.append(spec))
+    s = ox.Session(None, ["cls0"], "fp32", "cuda")
+    assert s._sess.get_providers()[0] == "CUDAExecutionProvider"
+    assert calls == ["preload", "session", "onnxruntime-gpu[cuda,cudnn]>=1.27", "preload", "session"]
+
+    cuda_loads[:] = [False, False]
+    with pytest.warns(UserWarning, match="runs on the CPU"):
+        ox.Session(None, ["cls0"], "fp32", "cuda")
+    calls.clear()
+    ox.Session(None, ["cls0"], "fp32", "cpu")          # the CPU asks for nothing
+    assert calls == ["session"]
 
 
 def test_an_onnx_file_without_a_sidecar_is_refused(onnx_path, tmp_path) -> None:

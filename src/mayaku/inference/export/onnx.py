@@ -6,7 +6,9 @@ QuantizeLinear / DequantizeLinear around every conv."""
 from __future__ import annotations
 
 import contextlib
+import io
 import tempfile
+import warnings
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from mayaku.inference.export.metadata import embed_sidecar
 from mayaku.inference.preprocess import Canvases, planar
 from mayaku.model import Detector
 from mayaku.model.contract import export_onnx
+from mayaku.utils.requirements import install, pip_spec
 
 PRECISIONS = ("fp32", "int8")
 REGRID_INT8 = True    # one-sided int8 ranges get the whole grid (`mayaku.model.quant`)
@@ -43,17 +46,41 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
     embed_sidecar(path, "onnx", dict(sidecar))
 
 
+def _session(ort: Any, path: Path, cuda: bool) -> Any:
+    """An onnxruntime session on CUDA when `cuda`, else the CPU. CUDA first
+    loads the CUDA and cuDNN libraries from their pip packages, which
+    onnxruntime does not find by itself."""
+    providers = ["CPUExecutionProvider"]
+    if cuda:
+        with contextlib.redirect_stdout(io.StringIO()):   # it prints each one it misses
+            ort.preload_dlls()
+        providers.insert(0, "CUDAExecutionProvider")
+    options = ort.SessionOptions()
+    # errors only: CUDA warns about every int8 graph, whose constant bias
+    # dequantization stays on the host (a few small copies, by design)
+    options.log_severity_level = 3
+    return ort.InferenceSession(str(path), options, providers=providers)
+
+
 class Session:
     """onnxruntime, on CUDA when asked for and available, else the CPU."""
 
     def __init__(self, path: Path, outputs: list[str], precision: str, device: str = "auto"):
         import onnxruntime as ort
 
-        providers = ["CPUExecutionProvider"]
-        if device.startswith(("cuda", "auto")) and \
-                "CUDAExecutionProvider" in ort.get_available_providers():
-            providers.insert(0, "CUDAExecutionProvider")
-        self._sess = ort.InferenceSession(str(path), providers=providers)
+        cuda = device.startswith(("cuda", "auto")) and \
+            "CUDAExecutionProvider" in ort.get_available_providers()
+        self._sess = _session(ort, path, cuda)
+        if cuda and "CUDAExecutionProvider" not in self._sess.get_providers():
+            # an onnxruntime-gpu installed without its CUDA libraries (before
+            # mayaku asked for them) falls back to the CPU: install them once
+            spec = pip_spec("onnxruntime")
+            error = install(spec, "onnxruntime runs on the CPU: its CUDA libraries are missing")
+            if error is None:
+                self._sess = _session(ort, path, cuda)
+            if "CUDAExecutionProvider" not in self._sess.get_providers():
+                warnings.warn(error or "onnxruntime runs on the CPU: its CUDA provider did not "
+                              f"load; reinstall it with: pip install '{spec}'", stacklevel=2)
         inp = self._sess.get_inputs()[0]
         self._input, self.outputs = inp.name, outputs
         self.input_hw = tuple(inp.shape[-2:])

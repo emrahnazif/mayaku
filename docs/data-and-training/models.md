@@ -16,14 +16,59 @@ Pass a model name wherever Mayaku takes weights (`train(weights=...)`, `from_pre
 | `mayaku-n-seg` | nano | Instance segmentation | released |
 | `mayaku-m-det` | medium | Object detection | released |
 | `mayaku-m-seg` | medium | Instance segmentation | released |
+| `mayaku-n-det-street` | nano | Object detection, 22 street classes | released |
+| `mayaku-n-seg-street` | nano | Instance segmentation, 22 street classes | released |
+| `mayaku-m-det-street` | medium | Object detection, 22 street classes | released |
+| `mayaku-m-seg-street` | medium | Instance segmentation, 22 street classes | released |
 
-All are pretrained on Objects365. The pattern is `mayaku-<size>-<task>`. To see what is currently hosted:
+The first four are pretrained on Objects365 with its 365 classes, and are the starting point for training on your own data. The pattern is `mayaku-<size>-<task>`. The `-street` models are ready to use on road and street scenes without training (see [Street models](#street-models)). To see what is currently hosted:
 
 ```bash
 mayaku download --list
 ```
 
 No keypoint, oriented-box or classification models are hosted; those tasks are experimental. Train them from the detector weights: [keypoints](/docs/more-tasks/keypoints.md), [oriented boxes](/docs/more-tasks/oriented-boxes.md#train), [classification](/docs/more-tasks/classification.md#train).
+
+## Street models
+
+The `-street` models detect what moves on or around a road, from every viewpoint a camera on a road has: dashcam, handheld, pole and CCTV, rooftop, drone and straight-down aerial. Use them as they are, or fine-tune them on your own street data like any other model.
+
+```python
+from mayaku import from_pretrained
+
+predictor = from_pretrained("mayaku-n-seg-street")
+detections = predictor("crossing.jpg")
+```
+
+The 22 classes:
+
+| Group | Classes |
+|---|---|
+| People | person, face, helmet |
+| Micromobility and assistive | bicycle, e-scooter, motorcycle, wheelchair, stroller |
+| Vehicles | car, truck, bus, emergency vehicle, train, three-wheeler, construction vehicle, trailer |
+| Road objects | license plate, traffic light, safety sign, stop sign, traffic cone |
+| Other | animal |
+
+Some classes are broader or narrower than in COCO:
+
+- **car** is every light vehicle, vans, SUVs and pickups included. **truck** is heavy goods vehicles only.
+- **emergency vehicle** is police cars, ambulances and fire engines.
+- **e-scooter** is stand-up scooters. Seated scooters and mopeds are **motorcycle**.
+- **train** includes trams. **three-wheeler** is tricycles, rickshaws and tuk-tuks. **construction vehicle** is excavators and forklifts.
+- **safety sign** is regulatory and warning signs. Street-name, direction and shop signs are not detected. **stop sign** is its own class.
+- **helmet** is any helmet, worn or not. **animal** is one class for dogs, cats, horses, cattle, sheep, birds and deer.
+
+Accuracy on the street validation set (17,712 images from Objects365, COCO, Wikimedia Commons, drone and aerial sources, 22 classes, COCO AP @[.5:.95]):
+
+| Model | Box AP | Box AP50 | Mask AP |
+|---|---|---|---|
+| street nano | 43.9 | 60.0 | 35.2 |
+| street medium | 56.8 | 72.1 | 45.5 |
+
+The `-det` and `-seg` models of one size give the same boxes; the `-seg` model also gives masks. The validation labels come from the same automatic labelling as the training labels, so they share its mistakes: for example, faces on posters and statues are labelled as faces, and the model detects them too.
+
+The training images include Wikimedia Commons images under their individual free licences, the Songdo Vision dataset (Fonod, Cho, Yeo and Geroliminis, 2025), roundabout aerial images by De-Las-Heras, Sánchez-Soriano and Puertas, and aerial photos from Beeldmateriaal Nederland / PDOK. The labels were made with SAM 3.
 
 ## Sizes
 

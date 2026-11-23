@@ -67,7 +67,7 @@ path = predictor.export("onnx", "model.onnx")                 # default precisio
 path = predictor.export("coreml", "model_int8.mlpackage", precision="int8")
 ```
 
-`export(target="onnx", output=None, precision=None)` returns the path written. Without `output`, it writes `model.<extension>` in the current directory.
+`export(target="onnx", output=None, precision=None)` returns the path written. Without `output`, it writes `model.<extension>` in the current directory. An `output` without the target's extension gets it added: `export("openvino", "street")` writes `street.xml`.
 
 ## The exported graph
 
@@ -120,7 +120,7 @@ mayaku export coreml   best.pt --precision int8 --output model_int8.mlpackage
 ### ONNX
 
 - The default `fp32` graph is the portable choice, and OpenVINO and TensorRT exports are built from it.
-- `from_pretrained("model.onnx")` uses onnxruntime's CUDA provider when `onnxruntime-gpu` is installed and a GPU is available, otherwise the CPU.
+- `from_pretrained("model.onnx")` uses onnxruntime's CUDA provider when `onnxruntime-gpu` is installed and a GPU is available, otherwise the CPU. An `onnxruntime-gpu` installed without its CUDA libraries would fall back to the CPU; Mayaku installs them the first time this happens, and warns if CUDA still does not load.
 
 ### Core ML
 

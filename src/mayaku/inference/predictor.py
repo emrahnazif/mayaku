@@ -47,10 +47,8 @@ class Predictor(Runner):
         """Write a deployable artifact with this model's sidecar embedded;
         `precision` defaults to the target's first. See
         `mayaku.inference.export.export`."""
-        from mayaku.inference.export import TARGETS, export
+        from mayaku.inference.export import export
 
-        if output is None and target in TARGETS:
-            output = Path("model").with_suffix(TARGETS[target].suffix)
         return export(self.model, self.sidecar, target, output or "model", precision)
 
 def from_pretrained(source: str | Path, device: str = "auto") -> Runner:
