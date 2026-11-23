@@ -1,321 +1,167 @@
-"""CoreML exporter for the in-scope detectors.
+"""CoreML: an ML Program package for Apple devices, traced from the model.
 
-Mirrors `BACKEND_PORTABILITY_REPORT.md` §6: convert the **Graph A**
-body (backbone + FPN producing ``{p2..p6}``) to a CoreML
-``mlprogram`` package via :func:`coremltools.convert`. Apple Vision
-expects RGB which is what we hand it (ADR 002 — no channel swap on
-deployment).
+fp16 (the default) runs on the Apple Neural Engine; fp32 on the GPU / CPU.
+int8 is W8A8 from the trained ranges: int8 weights, and every conv input
+quantized and dequantized with its observed range (iOS 17 / macOS 14 ops).
+It also runs on the Neural Engine, but on an M1 Max it is slower than fp16
+(3.9 against 3.4 ms for tier n at 640x640): chips before A17 Pro / M4 have
+no faster int8 path, so the quantize steps are pure cost there. The sidecar
+sits in ``user_defined_metadata``, written before saving.
 
-Same overall layout as :class:`mayaku.inference.export.onnx.ONNXExporter`:
-the per-image Python glue (RPN top-k + per-class NMS, mask paste,
-keypoint sub-pixel decode) intentionally stays out of the exported
-graph (BPR §6: "Paste masks in Swift via vImage or in Python via
-``_do_paste_mask`` — the exported graph stops at 28x28 logits").
-That keeps the CoreML artefact deterministic and dynamic-shape-
-friendly via :class:`coremltools.RangeDim`.
+The input is an image (8 bits per channel; the 1/255 scaling happens in the
+model), so a host hands Core ML the letterboxed pixels as an image and Core ML
+converts them where the model runs: the mayaku runtime's BGR canvas, or an
+app's camera buffer. A float tensor input made the host write three planar
+floats per pixel itself first: on an M4, 0.45 ms of a 2.1 ms int8 pipeline for
+tier n at 640 (0.08 ms for an image input).
 
-Inputs/outputs of the exported graph match :class:`ONNXExporter`:
-
-* ``"image"`` shape ``(1, 3, H, W)`` float32 RGB (already mean/std-
-  normalised), with ``H``/``W`` either fixed or
-  :class:`coremltools.RangeDim`.
-* ``"p2"`` … ``"p6"`` per-FPN-level ``(1, C, H/stride, W/stride)``.
-
-Parity caveats: the CoreML runtime only runs on macOS (the
-:class:`coremltools.models.MLModel.predict` API loads
-``Core ML.framework``). On non-macOS hosts we still produce the
-artefact and report a "skipped" :class:`ParityResult`; the
-``parity_check`` CLI / API call is a no-op there.
+For fp16 / fp32 the 1/255 is folded into the first conv's weights: an input
+scale is an op Core ML runs on the CPU ahead of the Neural Engine (0.3 ms of
+tier n at 640 on an M1 Max, about 1 ms at 800), and folded, the whole graph
+runs on the Neural Engine. int8 keeps the input scale: its first conv
+quantizes the scaled input with a trained range.
 """
 
 from __future__ import annotations
 
+import copy
 import platform
-from collections.abc import Sequence
+import warnings
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import numpy as np
 import torch
-from torch import Tensor, nn
 
-from mayaku.inference.export.base import ExportResult, ParityResult
-from mayaku.inference.export.full_detector import (
-    FULL_DETECTOR_OUTPUTS,
-    FullDetectorAdapter,
-    is_full_detector,
-)
+from mayaku.data.geometry import PREPROCESS
 from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
+from mayaku.inference.preprocess import Canvases, planar
+from mayaku.model import Detector
+from mayaku.model.quant import deploy_mode
 
-__all__ = ["CoreMLExporter"]
-
-# Standard FPN output names (`Backbone.output_shape()` from Step 8).
-_DEFAULT_OUT_NAMES: tuple[str, ...] = ("p2", "p3", "p4", "p5", "p6")
-# Strides associated with the default FPN levels above. p6 is
-# `LastLevelMaxPool(stride=2)` of p5 → effective stride 64.
+PRECISIONS = ("fp16", "fp32", "int8")
+REGRID_INT8 = False   # trained symmetric grid until the whole grid is measured on the Neural Engine
 
 
-class CoreMLExporter:
-    """Export the backbone+FPN body to a CoreML ``mlprogram`` package.
+def runnable() -> bool:
+    """Core ML runs on macOS only (a package can be written anywhere)."""
+    return platform.system() == "Darwin"
 
-    Args:
-        output_names: Names of the FPN feature outputs. Defaults to
-            ``("p2", "p3", "p4", "p5", "p6")``.
-        compute_units: Passed to the converter and echoed in
-            ``ExportResult.extras``. It does **not** travel with the
-            artifact — coremltools writes nothing about it into the
-            ``.mlpackage``, and :class:`~coremltools.models.MLModel`
-            defaults to ``ALL`` regardless. Where the graph actually
-            runs is chosen at load; see
-            :class:`mayaku.inference.artifact.ArtifactPredictor`.
-    """
 
-    name: str = "coreml"
+def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
+          sidecar: Mapping[str, Any]) -> None:
+    import coremltools as ct
 
-    _VALID_COMPUTE_UNITS: tuple[str, ...] = ("CPU_ONLY", "CPU_AND_GPU", "CPU_AND_NE", "ALL")
-    _VALID_PRECISION: tuple[str, ...] = ("fp32", "fp16")
+    int8 = precision == "int8"
+    x = torch.zeros(1, 3, *canvas)
+    # a float graph takes the 1/255 in its first conv: the input then needs no
+    # scaling op, which Core ML would run on the CPU ahead of the Neural Engine
+    scale = cast(float, PREPROCESS["scale"])
+    if not int8:
+        model, scale = _fold_input_scale(model, x, scale)
+    # coremltools converts TorchScript; torch's deprecation of it and its note
+    # on the list output say nothing actionable here
+    with torch.no_grad(), deploy_mode(model, int8, REGRID_INT8), warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        warnings.simplefilter("ignore", torch.jit.TracerWarning)
+        traced = torch.jit.trace(model, x)
+    if int8:
+        _register_int8_converters()
+    ml = ct.convert(
+        traced, inputs=[ct.ImageType(name="images", shape=tuple(x.shape),
+                                     scale=scale,
+                                     color_layout=ct.colorlayout.RGB)],
+        outputs=[ct.TensorType(name=n) for n in model.out_names], convert_to="mlprogram",
+        compute_precision=ct.precision.FLOAT32 if precision == "fp32" else ct.precision.FLOAT16,
+        minimum_deployment_target=ct.target.macOS14 if int8 else ct.target.macOS13)
+    ml.user_defined_metadata[SIDECAR_KEY] = sidecar_blob(dict(sidecar))
+    ml.save(str(path))
 
-    def __init__(
-        self,
-        *,
-        output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        compute_units: str = "CPU_AND_GPU",
-        compute_precision: str = "fp32",
-    ) -> None:
-        if compute_units not in self._VALID_COMPUTE_UNITS:
-            raise ValueError(
-                f"unknown CoreML compute_units {compute_units!r}; "
-                f"expected one of {self._VALID_COMPUTE_UNITS}"
-            )
-        if compute_precision not in self._VALID_PRECISION:
-            raise ValueError(
-                f"unknown CoreML compute_precision {compute_precision!r}; "
-                f"expected one of {self._VALID_PRECISION}"
-            )
-        self.output_names: tuple[str, ...] = tuple(output_names)
-        self.compute_units = compute_units
-        self.compute_precision = compute_precision
 
-    # ------------------------------------------------------------------
-    # Export
-    # ------------------------------------------------------------------
+def _fold_input_scale(model: Detector, x: torch.Tensor, scale: float) -> tuple[Detector, float]:
+    """(model to trace, input scale still needed): a copy of `model` whose
+    first conv takes pixels in [0, 255], its weights times `scale` -- conv(W *
+    s, x) = conv(W, x * s), zero padding scaling alike, the bias unchanged --
+    and 1.0; or `model` and `scale` as they are when no zero-padded conv reads
+    the input directly."""
+    folded = copy.deepcopy(model)
+    first: list[torch.nn.Conv2d] = []
 
-    def export(
-        self,
-        model: nn.Module,
-        sample: Tensor,
-        out_path: Path,
-        *,
-        sidecar: dict[str, Any] | None = None,
-        **opts: object,
-    ) -> ExportResult:
-        """Trace ``model.backbone`` and convert to CoreML.
+    def hook(mod: torch.nn.Conv2d, inp: tuple[torch.Tensor, ...]) -> None:
+        if not first and inp[0] is x:
+            first.append(mod)
 
-        ``sample`` is a normalised RGB batch ``(1, 3, H, W)`` used for
-        tracing. CoreML's ``mlprogram`` format supports dynamic input
-        sizes via :class:`coremltools.RangeDim`; we do **not** opt into
-        that here because dynamic shapes interact poorly with the
-        constant folding the converter does for FPN's stride-2 ops on
-        Apple Silicon. Most deployment workflows pin a fixed test
-        size (e.g. 800x1333) anyway, so we mirror that.
+    handles = [m.register_forward_pre_hook(hook) for m in folded.modules()
+               if isinstance(m, torch.nn.Conv2d)]
+    try:
+        with torch.no_grad(), deploy_mode(folded, False):
+            folded(x)
+    finally:
+        for h in handles:
+            h.remove()
+    if not first or first[0].padding_mode != "zeros":
+        return model, scale
+    with torch.no_grad():
+        first[0].weight.mul_(scale)
+    return folded, 1.0
 
-        ``sidecar`` (the :func:`mayaku.utils.build_sidecar` dict), when given, is
-        written into the model's ``user_defined_metadata`` before save so the
-        artifact is self-describing — done inline here rather than by re-loading
-        the saved ``.mlpackage`` (which can't be re-saved over itself).
-        """
-        del opts
-        # Lazy import keeps coremltools optional (`[coreml]` extra).
-        try:
-            import coremltools as ct
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "CoreML export requires the [coreml] extra: pip install mayaku[coreml]"
-            ) from e
 
-        # Full-detector models (UniQuery) trace the whole image -> (boxes,
-        # scores, labels) graph; everything else exports the backbone+FPN body.
-        if is_full_detector(model):
-            adapter: nn.Module = FullDetectorAdapter(model).eval()
-            out_names: tuple[str, ...] = FULL_DETECTOR_OUTPUTS
+def _register_int8_converters() -> None:
+    """Teach coremltools PyTorch's fake-quantize ops, which the int8 trace
+    carries: per-tensor activations become quantize -> dequantize, per-channel
+    weights int8 constants dequantized at load."""
+    from coremltools.converters.mil import Builder as mb
+    from coremltools.converters.mil.frontend.torch.ops import _get_inputs
+    from coremltools.converters.mil.frontend.torch.torch_op_registry import register_torch_op
+
+    @register_torch_op(override=True)
+    def fake_quantize_per_tensor_affine(context: Any, node: Any) -> None:
+        x, scale, zp, _, _ = _get_inputs(context, node, expected=5)
+        s, z = np.float32(scale.val), np.int8(zp.val)
+        q = mb.quantize(input=x, scale=s, zero_point=z, output_dtype="int8")
+        context.add(mb.dequantize(input=q, scale=s, zero_point=z, name=node.name))
+
+    @register_torch_op(override=True)
+    def fake_quantize_per_channel_affine(context: Any, node: Any) -> None:
+        w, scale, _, axis, _, _ = _get_inputs(context, node, expected=6)
+        s = scale.val.astype(np.float32)
+        q = np.clip(np.round(w.val / s.reshape(-1, 1, 1, 1)), -128, 127).astype(np.int8)
+        context.add(mb.constexpr_affine_dequantize(
+            quantized_data=q, zero_point=np.int8(0), scale=s, axis=int(axis.val),
+            name=node.name))
+
+
+class Session:
+    """Core ML; `device` "cpu" pins it to the CPU, anything else lets Core ML
+    place it (the Neural Engine where it can)."""
+
+    batch = 1
+
+    def __init__(self, path: Path, outputs: list[str], precision: str, device: str = "auto"):
+        import coremltools as ct
+
+        units = ct.ComputeUnit.CPU_ONLY if device == "cpu" else ct.ComputeUnit.ALL
+        self._model = ct.models.MLModel(str(path), compute_units=units)
+        t = self._model.get_spec().description.input[0].type
+        # an image input (current exports) or a float tensor (older ones)
+        self._image = t.WhichOneof("Type") == "imageType"
+        self.input_hw = ((int(t.imageType.height), int(t.imageType.width)) if self._image
+                         else tuple(int(v) for v in t.multiArrayType.shape[-2:]))
+        self.outputs = outputs
+
+    def canvases(self, n: int) -> Canvases | None:
+        return None        # the host conversion reads any array
+
+    def __call__(self, x: Canvases) -> list[torch.Tensor]:
+        """One BGR canvas (batch 1): read as an image from its BGR bytes for an
+        image-input model, else the planar floats."""
+        if self._image:
+            from PIL import Image
+
+            h, w = self.input_hw
+            px = Image.frombuffer("RGB", (w, h), np.ascontiguousarray(x[0]), "raw", "BGR", 0, 1)
+            out = self._model.predict({"images": px})
         else:
-            adapter = _DictToTupleBackbone(_resolve_backbone(model), self.output_names).eval()
-            out_names = self.output_names
-
-        if sample.shape[0] != 1:
-            raise ValueError(
-                "CoreML export requires a single-batch tracing sample "
-                f"(shape (1, 3, H, W)); got {tuple(sample.shape)}"
-            )
-
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with torch.no_grad():
-            traced = torch.jit.trace(  # type: ignore[no-untyped-call]
-                adapter, (sample,), check_trace=False
-            )
-
-        compute = _compute_units(ct, self.compute_units)
-        precision = _compute_precision(ct, self.compute_precision)
-        # `fp32` keeps eager-vs-CoreML parity tight (max abs ~1e-3), which the
-        # random-init `parity_check` tests rely on; `fp16` is what deployments
-        # want. See docs/export/coreml.md.
-        ml = ct.convert(
-            traced,
-            inputs=[ct.TensorType(name="image", shape=tuple(sample.shape))],
-            outputs=[ct.TensorType(name=n) for n in out_names],
-            convert_to="mlprogram",
-            compute_units=compute,
-            compute_precision=precision,
-        )
-        if sidecar is not None:
-            ml.user_defined_metadata[SIDECAR_KEY] = sidecar_blob(sidecar)
-        ml.save(str(out_path))
-
-        return ExportResult(
-            path=out_path,
-            target=self.name,
-            opset=None,
-            input_names=("image",),
-            output_names=out_names,
-            extras={
-                "compute_units": self.compute_units,
-                "compute_precision": self.compute_precision,
-                "input_shape": "x".join(str(int(d)) for d in sample.shape),
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # Parity
-    # ------------------------------------------------------------------
-
-    def parity_check(
-        self,
-        model: nn.Module,
-        exported_path: Path,
-        sample: Tensor,
-        *,
-        atol: float = 1e-2,
-        rtol: float = 1e-2,
-    ) -> ParityResult:
-        """Compare eager + CoreML predictions on ``sample``.
-
-        On non-macOS hosts the CoreML runtime isn't available, so the
-        parity check returns a passing :class:`ParityResult` with an
-        ``extras`` note explaining the skip. The artefact itself is
-        validated independently by the export-side test (the file
-        exists and has non-zero size).
-
-        CoreML's quantised pipeline introduces small numerical
-        differences vs eager fp32 — default tolerance is `1e-2`
-        (looser than ONNX's `1e-3`).
-        """
-        backbone = _resolve_backbone(model)
-        backbone.eval()
-        device = next(iter(backbone.parameters())).device
-
-        with torch.no_grad():
-            eager_out = backbone(sample.to(device))
-
-        if platform.system() != "Darwin":
-            return ParityResult(
-                target=self.name,
-                passed=True,
-                max_abs_error=0.0,
-                max_rel_error=0.0,
-                atol=atol,
-                rtol=rtol,
-                per_output={name: (0.0, 0.0) for name in self.output_names},
-            )
-
-        try:
-            import coremltools as ct
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "CoreML verify requires the [coreml] extra: pip install mayaku[coreml]"
-            ) from e
-
-        # Pin CPU here, not in the artifact: loading is where compute units are
-        # actually decided, and the check wants the same kernels on every host.
-        ml = ct.models.MLModel(str(exported_path), compute_units=ct.ComputeUnit.CPU_ONLY)
-        ort_inputs = {"image": sample.cpu().numpy()}
-        ml_out = ml.predict(ort_inputs)
-
-        per_output: dict[str, tuple[float, float]] = {}
-        max_abs = 0.0
-        max_rel = 0.0
-        for name in self.output_names:
-            ml_t = torch.from_numpy(ml_out[name])
-            eager_t = eager_out[name].cpu()
-            abs_err = float((ml_t - eager_t).abs().max().item())
-            rel_err = float(((ml_t - eager_t).abs() / eager_t.abs().clamp(min=1e-8)).max().item())
-            per_output[name] = (abs_err, rel_err)
-            max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-
-        passed = max_abs <= atol or max_rel <= rtol
-        return ParityResult(
-            target=self.name,
-            passed=passed,
-            max_abs_error=max_abs,
-            max_rel_error=max_rel,
-            atol=atol,
-            rtol=rtol,
-            per_output=per_output,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _DictToTupleBackbone(nn.Module):
-    """Same wrapper as the ONNX exporter's; trace plays nicer with tuples."""
-
-    def __init__(self, backbone: nn.Module, output_names: Sequence[str]) -> None:
-        super().__init__()
-        self.backbone = backbone
-        self.output_names = tuple(output_names)
-
-    def forward(self, image: Tensor) -> tuple[Tensor, ...]:
-        out = self.backbone(image)
-        return tuple(out[name] for name in self.output_names)
-
-
-def _resolve_backbone(model: nn.Module) -> nn.Module:
-    if hasattr(model, "backbone") and isinstance(model.backbone, nn.Module):
-        return model.backbone
-    return model
-
-
-# ---------------------------------------------------------------------------
-# Runtime adapter
-# ---------------------------------------------------------------------------
-
-
-def _compute_precision(ct_module: object, name: str) -> object:
-    """Resolve a string name into a ``ct.precision`` enum value."""
-    enum = ct_module.precision  # type: ignore[attr-defined]
-    if name == "fp32":
-        return enum.FLOAT32
-    if name == "fp16":
-        return enum.FLOAT16
-    raise ValueError(f"unknown CoreML compute_precision {name!r}; expected 'fp32' or 'fp16'")
-
-
-def _compute_units(ct_module: object, name: str) -> object:
-    """Resolve a string name into a ``ct.ComputeUnit`` enum value."""
-    enum = ct_module.ComputeUnit  # type: ignore[attr-defined]
-    if name == "CPU_ONLY":
-        return enum.CPU_ONLY
-    if name == "CPU_AND_GPU":
-        return enum.CPU_AND_GPU
-    if name == "ALL":
-        return enum.ALL
-    if name == "CPU_AND_NE":
-        # 6.0+ exposes this; older versions raise AttributeError.
-        return getattr(enum, "CPU_AND_NE", enum.ALL)
-    raise ValueError(
-        f"unknown CoreML compute_units {name!r}; expected CPU_ONLY / CPU_AND_GPU / CPU_AND_NE / ALL"
-    )
+            out = self._model.predict({"images": planar(x)})
+        return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]

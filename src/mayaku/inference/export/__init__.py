@@ -1,19 +1,177 @@
-"""Export targets: ONNX (required), CoreML/OpenVINO/TensorRT (best-effort)."""
+"""Export a trained detector to a deployable artifact with its sidecar embedded.
+
+Every target gets the same treatment: the model's deploy graph
+(`Detector.for_deploy`) at its canvas, the sidecar embedded in the artifact's
+own metadata slot (with the target and precision added), and the artifact run
+by its own runtime and its raw output maps compared against the Torch model's
+before it is returned. The targets built from ONNX check the five-op
+contract on it; Core ML traces the same module.
+
+A target module provides `PRECISIONS` (the first is the default),
+`REGRID_INT8` (whether int8 gives one-sided ranges the whole grid, which
+needs a zero point; `mayaku.model.quant.ActFakeQuant.export_qparams`),
+`write(model, path, canvas, precision, sidecar)`, `runnable()` (whether its
+runtime works on this host) and `Session(path, outputs, precision, device)`.
+
+| target   | file         | precisions (first = default) | runtime          |
+|----------|--------------|------------------------------|------------------|
+| onnx     | `.onnx`      | fp32, int8                   | onnxruntime      |
+| coreml   | `.mlpackage` | fp16, fp32, int8             | Core ML (macOS)  |
+| openvino | `.xml`       | fp32, fp16, int8             | OpenVINO         |
+| tensorrt | `.engine`    | fp16, fp32                   | TensorRT (CUDA)  |
+
+int8 needs a quantization-aware model and is the network it was trained as:
+every conv's input quantized with its observed range, weights per channel;
+ONNX and OpenVINO give ranges that are never negative the whole int8 grid
+over the same range (`REGRID_INT8`). The host decode is the same for every artifact
+(`mayaku.inference.decode`).
+"""
 
 from __future__ import annotations
 
-from mayaku.inference.export.base import Exporter, ExportResult, ParityResult
-from mayaku.inference.export.coreml import CoreMLExporter
-from mayaku.inference.export.onnx import ONNXExporter
-from mayaku.inference.export.openvino import OpenVINOExporter
-from mayaku.inference.export.tensorrt import TensorRTExporter
+import dataclasses
+import importlib
+import math
+from collections.abc import Mapping
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Protocol, cast
 
-__all__ = [
-    "CoreMLExporter",
-    "ExportResult",
-    "Exporter",
-    "ONNXExporter",
-    "OpenVINOExporter",
-    "ParityResult",
-    "TensorRTExporter",
-]
+import torch
+
+from mayaku.inference.export.metadata import RUNTIME, SUFFIX_TO_TARGET, target_from_suffix
+from mayaku.inference.preprocess import Canvases, network_input
+from mayaku.model import Detector
+from mayaku.model.quant import deploy_mode
+from mayaku.utils.requirements import require
+
+__all__ = ["TARGETS", "Target", "export", "open_session"]
+
+
+@dataclasses.dataclass(frozen=True)
+class Target:
+    suffix: str
+    module: ModuleType              # its `write`, `Session` and `PRECISIONS`
+
+    @property
+    def precisions(self) -> tuple[str, ...]:
+        """What it exports; the first is the default."""
+        return tuple(self.module.PRECISIONS)
+
+    @property
+    def regrid_int8(self) -> bool:
+        """Whether its int8 gives one-sided ranges the whole grid."""
+        return bool(self.module.REGRID_INT8)
+
+
+TARGETS = {t: Target(s, importlib.import_module(f"mayaku.inference.export.{t}"))
+           for s, t in SUFFIX_TO_TARGET.items()}
+
+# Parity tolerance on the RMS error relative to the outputs' RMS: a broken
+# conversion is off by about 100%, rounding is not. fp32 is float noise, fp16
+# its rounding over a deep stack. int8 is chaotic in its rounding: a value that
+# lands near a grid boundary flips a whole step on any summation-order change,
+# and the flips compound over the stack, so the trained simulation itself run
+# in float64 instead of float32 moves by about 3% (tier n); no int8 runtime
+# can match it closer than that. The parity input is uniform noise, harsher on
+# int8 than any image: exports of trained models sit between 10% and 17% there
+# (the street nano: ONNX Runtime 14.4-15.4%, OpenVINO 13.3-13.6% over three
+# seeds, 43.9 AP against 44.2 fp32 on its val). A broken conversion is off by
+# about 100%.
+_TOLERANCE = {"fp32": 1e-3, "fp16": 1e-2, "int8": 2e-1}
+
+# Where each target's parity runs: the compute it deploys on. Core ML pinned to
+# its CPU runs fp16 with fp16 accumulation, its least accurate path (several
+# percent off where the Neural Engine and the GPU are within 0.3%), so it is
+# checked as deployed; a TensorRT session uses CUDA regardless.
+_PARITY_DEVICE = {"coreml": "auto"}
+
+
+def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str | Path,
+           precision: str | None = None) -> Path:
+    """Write `model` (a trained `Detector`, left untouched) as a `target`
+    artifact at `path` with `sidecar` embedded (the target's extension is
+    added when `path` has none); `precision` defaults to the target's first;
+    returns the path written. Raises if the artifact's raw maps disagree with the Torch
+    model's. Parity is skipped, with the artifact still written, only where
+    its runtime cannot run on this host (Core ML off macOS)."""
+    if target not in TARGETS:
+        raise ValueError(f"unknown export target {target!r}; available: {', '.join(TARGETS)}")
+    t = TARGETS[target]
+    precision = precision or t.precisions[0]
+    if precision not in t.precisions:
+        raise ValueError(f"{target} exports {', '.join(t.precisions)}, not {precision}")
+    if precision == "int8" and not sidecar["quant"]["qat"]:
+        raise ValueError("int8 needs a quantization-aware model (train it with model.qat)")
+    path, canvas = _with_suffix(Path(path), target), tuple(sidecar["canvas_hw"])
+    m = model.for_deploy().cpu()
+    sidecar = {**sidecar, "export": {"target": target, "precision": precision}}
+    if target != "tensorrt" or torch.cuda.is_available():   # else `write` explains
+        require(RUNTIME[target])
+    t.module.write(m, path, canvas, precision, sidecar)
+    if not t.module.runnable():
+        return path
+    err = parity(m, path, sidecar)
+    if err > _TOLERANCE[precision]:
+        raise RuntimeError(f"{path}: {target} {precision} outputs differ from the Torch model "
+                           f"by {err:.2%} RMS (tolerance {_TOLERANCE[precision]:.1%})")
+    return path
+
+
+def _with_suffix(path: Path, target: str) -> Path:
+    """`path` with the target's extension added when it has none of its own,
+    so the artifact can be loaded back by its suffix; another target's
+    extension is a mistake and raises."""
+    other = SUFFIX_TO_TARGET.get(path.suffix.lower())
+    if other == target:
+        return path
+    if other:
+        raise ValueError(f"{path}: a {target} export is written as {TARGETS[target].suffix}, "
+                         f"not {path.suffix} (the {other} extension)")
+    return path.with_name(path.name + TARGETS[target].suffix)
+
+
+class Session(Protocol):
+    """What every target's runtime session offers (`open_session`)."""
+
+    input_hw: tuple[int, ...]
+    batch: int | None
+
+    def __call__(self, x: Canvases) -> list[torch.Tensor]: ...
+
+    def canvases(self, n: int) -> Canvases | None:
+        """Its own input buffer for `n` images, to letterbox straight into
+        (TensorRT's pinned upload buffer), or None."""
+
+
+def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -> Session:
+    """The runtime session for an artifact: called with BGR canvases on the
+    host (`mayaku.inference.preprocess`; each runtime turns them into the
+    graph's planar RGB in [0, 1] where it runs), returns
+    the raw maps as tensors in the sidecar's output order, on the device it
+    ran on, possibly its own buffers until its next call. `batch` is the
+    batch size it was traced at (None: any)."""
+    target = target_from_suffix(path)
+    require(RUNTIME[target])
+    t = TARGETS[target]
+    precision = sidecar["export"]["precision"]
+    return cast(Session, t.module.Session(Path(path), list(sidecar["outputs"]), precision, device))
+
+
+@torch.no_grad()
+def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 0) -> float:
+    """RMS difference between an artifact's raw maps and the Torch deploy
+    model's (its int8 simulation for an int8 artifact) on one random
+    canvas-sized image, relative to the maps' RMS, with the artifact run on
+    the compute it deploys on (`_PARITY_DEVICE`, else the CPU)."""
+    target = sidecar["export"]["target"]
+    session = open_session(path, sidecar, _PARITY_DEVICE.get(target, "cpu"))
+    px = torch.randint(0, 256, (1, *sidecar["canvas_hw"], 3), dtype=torch.uint8,
+                       generator=torch.Generator().manual_seed(seed)).numpy()
+    with deploy_mode(model, sidecar["export"]["precision"] == "int8", TARGETS[target].regrid_int8):
+        ref = model.eval()(network_input(px, torch.device("cpu")))
+    got = session(px)
+    err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())
+              for r, g in zip(ref, got, strict=True))
+    norm = sum(float((r.double() ** 2).sum()) for r in ref)
+    return math.sqrt(err / max(norm, 1e-12))
