@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- int8 ONNX files are a quarter of the size and run as int8 in onnxruntime. Weights were stored
+  as fp32 behind a quantize step, so the file was as large as fp32 and onnxruntime ran every conv
+  in float between extra quantize and dequantize steps, slower than the fp32 file. Weights are now
+  stored as int8, biases as int32 and activations as uint8 on the same grid, the form onnxruntime
+  fuses into int8 convolutions; the network is the same. Street nano seg (1,500 street validation
+  images, onnxruntime CPU): 21.5 MB to 5.8 MB, box AP 44.21 to 44.29 (fp32 44.14); one 800x800
+  image on an i9-10900X takes 131 ms on one thread instead of 201 (fp32 127), and 121 ms in
+  Chrome with onnxruntime-web instead of 161 (fp32 150). Street medium seg: 131 MB to 34 MB, box
+  AP 56.26 to 56.14 (fp32 56.28). The convs that feed a residual add or an output have no trained
+  int8 output range and stay float, so on a many-core CPU fp32 is still faster (nano, 20 threads:
+  63 ms, fp32 26). OpenVINO and TensorRT exports are unchanged.
+
 - The docs tell the two kinds of hosted models apart: base models to fine-tune, and
   ready-to-use models to run as they are. The street models have their own page: classes,
   accuracy, speed, a comparison with COCO models and known limitations.

@@ -18,7 +18,7 @@ import torch
 from mayaku.inference.export.metadata import embed_sidecar
 from mayaku.inference.preprocess import Canvases, planar
 from mayaku.model import Detector
-from mayaku.model.contract import export_onnx
+from mayaku.model.contract import assert_contract, export_onnx
 from mayaku.utils.requirements import install, pip_spec
 
 PRECISIONS = ("fp32", "int8")
@@ -43,7 +43,85 @@ def onnx_graph(model: Detector, canvas: tuple[int, int], int8: bool, batch: int 
 def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
           sidecar: Mapping[str, Any]) -> None:
     export_onnx(model, str(path), canvas, int8=precision == "int8", regrid=REGRID_INT8)
+    if precision == "int8":
+        store_int8(path)
+        assert_contract(str(path), int8=True)
     embed_sidecar(path, "onnx", dict(sidecar))
+
+
+def store_int8(path: Path) -> None:
+    """Rewrite an int8 graph in the form ONNX Runtime runs as int8.
+
+    The traced graph keeps each weight in float behind its QuantizeLinear,
+    and its activations' zero points are int8. ONNX Runtime fuses
+    DequantizeLinear -> Conv -> QuantizeLinear into one int8 convolution only
+    for int8 weight initializers, int32 biases and uint8 activations;
+    otherwise every conv runs in float between extra (de)quantize steps, and
+    the file is as large as fp32. Same network: each weight is the int8 value
+    its QuantizeLinear gave, each activation the same grid shifted by 128,
+    each bias rounded to the conv's accumulator step (input scale x weight
+    scale), as an int8 runtime adds it."""
+    import numpy as np
+    import onnx
+    from onnx import helper, numpy_helper
+
+    m = onnx.load(str(path))
+    g = m.graph
+    init = {i.name: i for i in g.initializer}
+    producer = {o: n for n in g.node for o in n.output}
+
+    def value(name: str) -> Any:    # an initializer, else a Constant node's value
+        t = init[name] if name in init else producer[name].attribute[0].t
+        return numpy_helper.to_array(t)
+
+    def add(array: Any, name: str) -> str:
+        name = f"{name}_{len(g.initializer)}"
+        g.initializer.append(numpy_helper.from_array(array, name))
+        return name
+
+    dropped, bias_dq, weight_dq = set(), [], set()
+    for conv in [n for n in g.node if n.op_type == "Conv"]:
+        x_dq, w_dq = producer[conv.input[0]], producer[conv.input[1]]
+        w_q = producer[w_dq.input[0]]
+        if not (x_dq.op_type == w_dq.op_type == "DequantizeLinear"
+                and w_q.op_type == "QuantizeLinear"):
+            continue    # a conv left in float (one that feeds a residual add)
+        w, w_scale = value(w_q.input[0]), value(w_q.input[1])
+        assert not np.any(value(w_q.input[2])), "weights are quantized symmetrically"
+        per_channel = w_scale.reshape((-1,) + (1,) * (w.ndim - 1))
+        w_dq.input[0] = add(np.clip(np.round(w / per_channel), -128, 127).astype(np.int8),
+                            conv.input[1] + "_int8")
+        dropped.add(w_q.output[0])
+        weight_dq.add(w_dq.output[0])
+        b_scale = value(x_dq.input[1]) * w_scale
+        b = np.round(value(conv.input[2]) / b_scale).astype(np.int32)
+        out = conv.input[2] + "_dq"     # zero point left out: 0
+        bias_dq.append(helper.make_node(
+            "DequantizeLinear",
+            [add(b, conv.input[2] + "_int32"), add(b_scale, conv.input[2] + "_scale")],
+            [out], axis=0))
+        conv.input[2] = out
+
+    nodes = [n for n in g.node if n.output[0] not in dropped]
+    uint8: dict[str, str] = {}      # int8 zero point -> the same grid as uint8
+    for n in nodes:
+        if n.op_type in ("QuantizeLinear", "DequantizeLinear") and len(n.input) > 2 \
+                and n.output[0] not in weight_dq and value(n.input[2]).dtype == np.int8:
+            z = n.input[2]
+            if z not in uint8:
+                uint8[z] = add((value(z).astype(np.int16) + 128).astype(np.uint8), z + "_u8")
+            n.input[2] = uint8[z]
+
+    nodes = bias_dq + nodes
+    used = {i for n in nodes for i in n.input}   # Constant nodes have no inputs
+    nodes = [n for n in nodes if n.op_type != "Constant" or n.output[0] in used]
+    kept = [i for i in g.initializer if i.name in used]
+    del g.node[:]
+    g.node.extend(nodes)
+    del g.initializer[:]
+    g.initializer.extend(kept)
+    onnx.checker.check_model(m)
+    onnx.save(m, str(path))
 
 
 def _session(ort: Any, path: Path, cuda: bool) -> Any:

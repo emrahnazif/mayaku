@@ -260,6 +260,25 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
         assert not all(torch.equal(f, o) for f, o in zip(first, other, strict=True))
 
 
+def test_int8_onnx_stores_int8_and_runs_as_int8(predictor, onnx_path, tmp_path) -> None:
+    """Weights stored as int8 (a quarter of the fp32 file) in the form ONNX
+    Runtime fuses into int8 convolutions, not float convs between extra
+    (de)quantize steps."""
+    import onnx
+    import onnxruntime as ort
+
+    int8 = predictor.export("onnx", tmp_path / "int8.onnx", "int8")
+    assert int8.stat().st_size < 0.4 * onnx_path.stat().st_size
+    options = ort.SessionOptions()
+    options.optimized_model_filepath = str(tmp_path / "optimized.onnx")
+    ort.InferenceSession(str(int8), options, providers=["CPUExecutionProvider"])
+    ops = [n.op_type for n in onnx.load(options.optimized_model_filepath).graph.node]
+    convs = {op: ops.count(op) for op in ("QLinearConv", "Conv", "FusedConv")}
+    # the convs that feed a residual add or an output have no int8 output range
+    # and stay float; on tier n the rest are a little over half of them
+    assert convs["QLinearConv"] > 0.5 * sum(convs.values()), convs
+
+
 def test_export_refuses_what_a_target_or_model_cannot_do(predictor, tmp_path) -> None:
     with pytest.raises(ValueError, match="fp16"):
         predictor.export("onnx", tmp_path / "m.onnx", "fp16")

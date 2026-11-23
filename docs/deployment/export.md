@@ -120,6 +120,7 @@ mayaku export coreml   best.pt --precision int8 --output model_int8.mlpackage
 ### ONNX
 
 - The default `fp32` graph is the portable choice, and OpenVINO and TensorRT exports are built from it.
+- An `int8` file stores its weights as int8, about a quarter of the fp32 file (street nano: 5.8 MB instead of 21.2 MB), and onnxruntime runs most of its convolutions as int8. It is faster in the browser (street nano at 800×800 on an i9-10900X, Chrome with onnxruntime-web: 121 ms instead of 150) and about as fast as fp32 on one CPU thread (131 ms against 127). On a many-core CPU the fp32 file is faster (nano, 20 threads: 26 ms against 63), and on an Intel CPU an OpenVINO int8 export is the fast option.
 - `from_pretrained("model.onnx")` uses onnxruntime's CUDA provider when `onnxruntime-gpu` is installed and a GPU is available, otherwise the CPU. An `onnxruntime-gpu` installed without its CUDA libraries would fall back to the CPU; Mayaku installs them the first time this happens, and warns if CUDA still does not load.
 
 ### Core ML
