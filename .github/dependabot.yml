@@ -16,6 +16,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Change a requirement only when the new release falls outside it: the
+    # exact pins above move, but a user-facing floor such as
+    # `opencv-python-headless>=4.8` already allows every newer release, and
+    # raising it would only force users off versions mayaku still supports.
+    versioning-strategy: increase-if-necessary
     # One PR for the whole toolchain: these are upgraded together or not at all,
     # and a single "bump lint tooling" PR is easier to review than four.
     groups:
