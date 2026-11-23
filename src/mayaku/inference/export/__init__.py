@@ -8,6 +8,8 @@ before it is returned. The targets built from ONNX check the five-op
 contract on it; Core ML traces the same module.
 
 A target module provides `PRECISIONS` (the first is the default),
+`REGRID_INT8` (whether int8 gives one-sided ranges the whole grid, which
+needs a zero point; `mayaku.model.quant.ActFakeQuant.export_qparams`),
 `write(model, path, canvas, precision, sidecar)`, `runnable()` (whether its
 runtime works on this host) and `Session(path, outputs, precision, device)`.
 
@@ -18,9 +20,10 @@ runtime works on this host) and `Session(path, outputs, precision, device)`.
 | openvino | `.xml`       | fp32, fp16, int8             | OpenVINO         |
 | tensorrt | `.engine`    | fp16, fp32                   | TensorRT (CUDA)  |
 
-int8 needs a quantization-aware model and is exactly the network it was
-trained as: every conv's input quantized with its observed range, weights per
-channel. The host decode is the same for every artifact
+int8 needs a quantization-aware model and is the network it was trained as:
+every conv's input quantized with its observed range, weights per channel;
+ONNX and OpenVINO give ranges that are never negative the whole int8 grid
+over the same range (`REGRID_INT8`). The host decode is the same for every artifact
 (`mayaku.inference.decode`).
 """
 
@@ -54,6 +57,11 @@ class Target:
     def precisions(self) -> tuple[str, ...]:
         """What it exports; the first is the default."""
         return tuple(self.module.PRECISIONS)
+
+    @property
+    def regrid_int8(self) -> bool:
+        """Whether its int8 gives one-sided ranges the whole grid."""
+        return bool(self.module.REGRID_INT8)
 
 
 TARGETS = {t: Target(s, importlib.import_module(f"mayaku.inference.export.{t}"))
@@ -146,7 +154,7 @@ def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 
     session = open_session(path, sidecar, _PARITY_DEVICE.get(target, "cpu"))
     px = torch.randint(0, 256, (1, *sidecar["canvas_hw"], 3), dtype=torch.uint8,
                        generator=torch.Generator().manual_seed(seed)).numpy()
-    with deploy_mode(model, sidecar["export"]["precision"] == "int8"):
+    with deploy_mode(model, sidecar["export"]["precision"] == "int8", TARGETS[target].regrid_int8):
         ref = model.eval()(network_input(px, torch.device("cpu")))
     got = session(px)
     err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())

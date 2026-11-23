@@ -54,19 +54,20 @@ def assert_contract(path, int8=False):
     return collections.Counter({k: v for k, v in inv.items() if k not in FOLDABLE_OPS})
 
 
-def export_onnx(model, path, canvas, batch=1, int8=False):
+def export_onnx(model, path, canvas, batch=1, int8=False, *, regrid=False):
     """Trace the (fused) detector at a fixed (H, W) canvas to ONNX and assert
     the contract on the file.
 
     The default is the structural fp32 graph: fake-quant is a training
     simulation and is left out. `int8` (a quantization-aware model only)
     writes the explicit int8 graph instead, the trained ranges as
-    QuantizeLinear / DequantizeLinear around every conv.
+    QuantizeLinear / DequantizeLinear around every conv; `regrid` as in
+    `mayaku.model.quant.qdq_export`.
     """
     h, w = as_canvas(canvas)
     if int8 and not is_qat(model):
         raise ValueError("an int8 graph needs a quantization-aware model (model.qat)")
-    with deploy_mode(model, int8):
+    with deploy_mode(model, int8, regrid):
         torch.onnx.export(model, torch.zeros(batch, 3, h, w), path,
                           input_names=["images"], output_names=model.out_names,
                           opset_version=17, dynamo=False)

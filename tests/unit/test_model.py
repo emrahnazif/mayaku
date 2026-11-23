@@ -133,7 +133,8 @@ def test_qat_ranges_survive_fusion() -> None:
 
 def test_int8_graph_is_the_training_simulation(tmp_path) -> None:
     """The QDQ graph computes exactly what fake-quant trained, and exports as
-    the contract plus Q/DQ pairs; a model without QAT has no int8 graph."""
+    the contract plus Q/DQ pairs, also with one-sided ranges regridded (zero
+    point -128); a model without QAT has no int8 graph."""
     m = _calibrated_qat().fuse()
     x = torch.rand(1, 3, 64, 64)
     with torch.no_grad():
@@ -141,8 +142,11 @@ def test_int8_graph_is_the_training_simulation(tmp_path) -> None:
         with qdq_export(m):
             qdq = m(x)
     assert all(torch.equal(a, b) for a, b in zip(sim, qdq, strict=True))
-    inv = export_onnx(m, str(tmp_path / "int8.onnx"), 64, int8=True)
-    assert set(inv) <= DEPLOY_OPS | QDQ_OPS and inv["QuantizeLinear"] > 0
+    with qdq_export(m, regrid=True):
+        assert any(c.qdq[1] == -128 for c in m.modules() if getattr(c, "qdq", None))
+    for regrid in (False, True):
+        inv = export_onnx(m, str(tmp_path / f"int8_{regrid}.onnx"), 64, int8=True, regrid=regrid)
+        assert set(inv) <= DEPLOY_OPS | QDQ_OPS and inv["QuantizeLinear"] > 0
     with pytest.raises(ValueError, match="quantization-aware"):
         export_onnx(Detector(TINY, 4).fuse(), str(tmp_path / "x.onnx"), 64, int8=True)
 

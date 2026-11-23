@@ -19,6 +19,7 @@ from mayaku.model import Detector
 from mayaku.model.contract import export_onnx
 
 PRECISIONS = ("fp32", "int8")
+REGRID_INT8 = True    # one-sided int8 ranges get the whole grid (`mayaku.model.quant`)
 
 
 def runnable() -> bool:
@@ -26,18 +27,19 @@ def runnable() -> bool:
 
 
 @contextlib.contextmanager
-def onnx_graph(model: Detector, canvas: tuple[int, int], int8: bool, batch: int = 1) -> Iterator[Path]:
+def onnx_graph(model: Detector, canvas: tuple[int, int], int8: bool, batch: int = 1,
+               regrid: bool = False) -> Iterator[Path]:
     """The model as a contract-checked ONNX file in a temporary directory,
     for the runtimes that build from ONNX."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "model.onnx"
-        export_onnx(model, str(path), canvas, batch=batch, int8=int8)
+        export_onnx(model, str(path), canvas, batch=batch, int8=int8, regrid=regrid)
         yield path
 
 
 def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
           sidecar: Mapping[str, Any]) -> None:
-    export_onnx(model, str(path), canvas, int8=precision == "int8")
+    export_onnx(model, str(path), canvas, int8=precision == "int8", regrid=REGRID_INT8)
     embed_sidecar(path, "onnx", dict(sidecar))
 
 

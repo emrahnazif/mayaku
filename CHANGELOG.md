@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- int8 ONNX and OpenVINO exports lose less accuracy. Most activations are ReLU outputs, which are
+  never negative, and the symmetric int8 grid gave them only its 128 non-negative levels. These
+  exports now give such a tensor the whole int8 grid over the same trained range: half the step,
+  and every level the model trained with is still on the grid, so existing checkpoints improve
+  without retraining. On the street models (1,467 validation images, ONNX Runtime), the int8 box
+  AP gap to fp32 goes from 0.37 to -0.13 for nano and from 0.44 to 0.18 for m; OpenVINO gives the
+  same. TensorRT has no zero point and keeps the trained symmetric grid; Core ML keeps it until
+  it is measured on the Neural Engine.
+- `mayaku.model.export_onnx` takes `regrid=True` for that int8 grid; its default output is
+  unchanged.
+
 ## v3.1.0: Predictions ready for applications
 
 - Predictions now use their own post-processing: a score threshold, NMS at IoU 0.5 and one class

@@ -41,6 +41,7 @@ from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
 
 PRECISIONS = ("fp16", "fp32", "int8")
+REGRID_INT8 = False   # trained symmetric grid until the whole grid is measured on the Neural Engine
 
 
 def runnable() -> bool:
@@ -61,7 +62,7 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
         model, scale = _fold_input_scale(model, x, scale)
     # coremltools converts TorchScript; torch's deprecation of it and its note
     # on the list output say nothing actionable here
-    with torch.no_grad(), deploy_mode(model, int8), warnings.catch_warnings():
+    with torch.no_grad(), deploy_mode(model, int8, REGRID_INT8), warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         warnings.simplefilter("ignore", torch.jit.TracerWarning)
         traced = torch.jit.trace(model, x)
