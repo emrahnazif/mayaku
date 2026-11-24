@@ -21,7 +21,7 @@ from mayaku.model import (
 )
 from mayaku.model.blocks import SPPFAdd, as_canvas, conv_bn_pairs, rescale_to_init
 from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx, randomize_bn
-from mayaku.model.quant import qdq_export
+from mayaku.model.quant import QuantConv2d, ResidualQuant, qdq_export
 
 onnx = pytest.importorskip("onnx")
 
@@ -144,6 +144,13 @@ def test_int8_graph_is_the_training_simulation(tmp_path) -> None:
     assert all(torch.equal(a, b) for a, b in zip(sim, qdq, strict=True))
     with qdq_export(m, regrid=True):
         assert any(c.qdq[1] == -128 for c in m.modules() if getattr(c, "qdq", None))
+    # float skips: residual operands pass through, the convs stay int8, all restored after
+    skips = [c for c in m.modules() if isinstance(c, ResidualQuant)]
+    assert any(c.observed for c in skips)
+    with torch.no_grad(), qdq_export(m, skips=False):
+        assert all(c.qdq is None and torch.equal(c(x), x) for c in skips)
+        assert all(c.qdq for c in m.modules() if isinstance(c, QuantConv2d))
+    assert all(c.fake_quant and c.qdq is None for c in skips)
     for regrid in (False, True):
         inv = export_onnx(m, str(tmp_path / f"int8_{regrid}.onnx"), 64, int8=True, regrid=regrid)
         assert set(inv) <= DEPLOY_OPS | QDQ_OPS and inv["QuantizeLinear"] > 0

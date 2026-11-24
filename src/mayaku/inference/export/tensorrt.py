@@ -35,6 +35,7 @@ from mayaku.utils.requirements import require
 
 PRECISIONS = ("fp16", "int8", "fp32")
 REGRID_INT8 = False   # no zero point: int8 keeps the trained symmetric grid (`mayaku.model.quant`)
+QUANT_SKIPS = True    # quantized skips let TensorRT fuse each add into its conv
 
 
 _WORKSPACE = 1 << 30

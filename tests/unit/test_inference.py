@@ -228,6 +228,21 @@ def _runtime(target: str) -> None:
                          "openvino": "openvino", "tensorrt": "tensorrt"}[target])
 
 
+def _assert_float_skips(path) -> None:
+    """Every conv input of a Core ML int8 package is quantized, but no add reads
+    a dequantized operand: a quantized skip makes the Neural Engine compiler
+    fail on large canvases (`mayaku.inference.export.coreml`)."""
+    import coremltools as ct
+
+    main = ct.models.MLModel(str(path), skip_model_load=True).get_spec().mlProgram.functions["main"]
+    ops = next(iter(main.block_specializations.values())).operations
+    dequantized = {out.name for op in ops if op.type == "dequantize" for out in op.outputs}
+    adds = [op for op in ops if op.type == "add"]
+    assert adds and dequantized
+    assert not any(a.name in dequantized
+                   for op in adds for arg in op.inputs.values() for a in arg.arguments)
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(("target", "precision"), [
     ("onnx", "int8"), ("coreml", "fp16"), ("coreml", "int8"), ("openvino", "fp32"),
@@ -245,10 +260,13 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
     # simulation, not to the float model (on this barely trained model many
     # detections sit at the threshold, where int8 rounding moves the count)
     # the recorded decode (conf 0.3, multi-label), as before prediction defaults existed
-    with qdq_export(predictor.model) if precision == "int8" else contextlib.nullcontext():
+    with (qdq_export(predictor.model, skips=TARGETS[target].quant_skips) if precision == "int8"
+          else contextlib.nullcontext()):
         want = predictor.batch(run[2], decode="eval")
     got = a.batch(run[2], decode="eval")
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
+    if (target, precision) == ("coreml", "int8"):
+        _assert_float_skips(path)
     if target == "tensorrt":    # the first call records a CUDA graph, later calls replay it
         s = open_session(path, a.sidecar, "cuda")
         px = torch.randint(0, 256, (2, 1, *a.canvas, 3), dtype=torch.uint8,

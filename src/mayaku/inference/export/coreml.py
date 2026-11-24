@@ -3,9 +3,11 @@
 fp16 (the default) runs on the Apple Neural Engine; fp32 on the GPU / CPU.
 int8 is W8A8 from the trained ranges: int8 weights, and every conv input
 quantized and dequantized with its observed range (iOS 17 / macOS 14 ops).
-It also runs on the Neural Engine, but on an M1 Max it is slower than fp16
-(3.9 against 3.4 ms for tier n at 640x640): chips before A17 Pro / M4 have
-no faster int8 path, so the quantize steps are pure cost there. The sidecar
+The skip operand of a residual add stays float (`QUANT_SKIPS`): its
+quantize exists for TensorRT's add fusion, and with it the Neural Engine
+compiler fails on large canvases (M1 Max, macOS 26.6.2: from 800x800 on, at
+the second residual add of the 200x200 stage), so Core ML ran the whole model
+on the CPU, 187 ms instead of 5.8 ms for the street nano at 800. The sidecar
 sits in ``user_defined_metadata``, written before saving.
 
 The input is an image (8 bits per channel; the 1/255 scaling happens in the
@@ -42,6 +44,7 @@ from mayaku.model.quant import deploy_mode
 
 PRECISIONS = ("fp16", "fp32", "int8")
 REGRID_INT8 = False   # trained symmetric grid until the whole grid is measured on the Neural Engine
+QUANT_SKIPS = False   # a quantized skip fails the Neural Engine compile from 800x800 (above)
 
 
 def runnable() -> bool:
@@ -62,7 +65,8 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
         model, scale = _fold_input_scale(model, x, scale)
     # coremltools converts TorchScript; torch's deprecation of it and its note
     # on the list output say nothing actionable here
-    with torch.no_grad(), deploy_mode(model, int8, REGRID_INT8), warnings.catch_warnings():
+    with torch.no_grad(), deploy_mode(model, int8, REGRID_INT8, QUANT_SKIPS), \
+            warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         warnings.simplefilter("ignore", torch.jit.TracerWarning)
         traced = torch.jit.trace(model, x)

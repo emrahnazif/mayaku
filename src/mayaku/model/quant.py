@@ -368,28 +368,38 @@ def fake_quant_disabled(model):
 
 
 @contextlib.contextmanager
-def qdq_export(model, regrid=False):
+def qdq_export(model, regrid=False, skips=True):
     """Inside the block every QuantConv2d in `model` runs the explicit int8
     graph (`QuantConv2d._qdq_forward`), and every observed ResidualQuant
     quantizes its operand the same way, so an ONNX export carries the trained
     ranges as QuantizeLinear / DequantizeLinear pairs (`regrid`: see
-    `ActFakeQuant.export_qparams`). Use on a fused model."""
+    `ActFakeQuant.export_qparams`). `skips` False leaves every residual
+    operand float, a plain add: its quantize only serves an add fusion
+    (TensorRT's), and the Neural Engine compiler fails on it at large
+    canvases (`mayaku.inference.export.coreml`). Use on a fused model."""
     # an unobserved residual operand stays a plain add
-    quant = [m for m in _quant_modules(model) if isinstance(m, QuantConv2d) or m.observed]
+    quant = [m for m in _quant_modules(model)
+             if isinstance(m, QuantConv2d) or (skips and m.observed)]
+    plain = [] if skips else [m for m in _quant_modules(model) if isinstance(m, ResidualQuant)]
+    saved = [m.fake_quant for m in plain]
     for m in quant:
         scale, zp = m.act_fq.export_qparams(regrid)
         m.qdq = (float(scale), int(zp)) + ((_weight_scales(m.weight),) if isinstance(m, QuantConv2d) else ())
+    for m in plain:
+        m.fake_quant = False
     try:
         yield model
     finally:
         for m in quant:
             m.qdq = None
+        for m, s in zip(plain, saved, strict=True):
+            m.fake_quant = s
 
 
-def deploy_mode(model, int8=False, regrid=False):
+def deploy_mode(model, int8=False, regrid=False, skips=True):
     """The graph an export traces: the explicit int8 graph (`qdq_export`,
-    with `regrid`) or the structural fp32 one (`fake_quant_disabled`)."""
-    return qdq_export(model, regrid) if int8 else fake_quant_disabled(model)
+    with `regrid` and `skips`) or the structural fp32 one (`fake_quant_disabled`)."""
+    return qdq_export(model, regrid, skips) if int8 else fake_quant_disabled(model)
 
 
 @contextlib.contextmanager

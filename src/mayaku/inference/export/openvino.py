@@ -21,6 +21,7 @@ from mayaku.model import Detector
 
 PRECISIONS = ("fp32", "fp16", "int8")
 REGRID_INT8 = True    # one-sided int8 ranges get the whole grid (`mayaku.model.quant`)
+QUANT_SKIPS = True    # residual skips quantized, as trained
 
 
 def runnable() -> bool:

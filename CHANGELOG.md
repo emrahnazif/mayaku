@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- int8 Core ML models from 800×800 up run on the Neural Engine again. Their skip connections were
+  quantized for TensorRT's sake, and with them the Neural Engine compiler failed, so Core ML
+  quietly ran the whole model on the CPU and took 40 s or more to load it. The skips now stay
+  float in Core ML exports; ONNX, OpenVINO and TensorRT exports are unchanged. Street models at
+  800×800, one 1920×1080 frame end to end on an M1 Max (macOS 26.6.2): nano 160 ms to 13.0 ms,
+  medium seg 377 ms to 38.8 ms, about as fast as fp16 there, as on every chip before the A17 Pro
+  and M4.
+
 - int8 ONNX files are a quarter of the size and run as int8 in onnxruntime. Weights were stored
   as fp32 behind a quantize step, so the file was as large as fp32 and onnxruntime ran every conv
   in float between extra quantize and dequantize steps, slower than the fp32 file. Weights are now
