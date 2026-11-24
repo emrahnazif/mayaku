@@ -96,6 +96,25 @@ det = predictor("crossing.jpg")
 The class names and decode settings are embedded in each file. They were written by
 `predictor.export("openvino", precision="int8")`, which works the same on a model you fine-tuned.
 
+## Run with Core ML
+
+The `coreml/` folder holds this model as a Core ML package in fp16, which runs on the Apple
+Neural Engine: {{coreml_speed}} per 1920×1080 frame end to end on an M1 Max (median of 60
+frames). It needs macOS 13 / iOS 16 or newer.
+
+```python
+from huggingface_hub import snapshot_download
+from mayaku import from_pretrained
+
+folder = snapshot_download("enazif/{{name}}", allow_patterns="coreml/*")
+predictor = from_pretrained(f"{folder}/coreml/{{name}}-fp16.mlpackage")
+det = predictor("crossing.jpg")
+```
+
+A `.mlpackage` is a folder: copy it whole. The model outputs the network's raw maps; Mayaku's
+predictor turns them into {{gives}}, so in Swift you decode them yourself. The class
+names and decode settings are embedded in the package, written by `predictor.export("coreml")`.
+
 ## The 22 classes
 
 | Group | Classes |

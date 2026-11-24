@@ -8,6 +8,11 @@ Each model gets its own repo, ``enazif/<name>``, holding:
 - ``<name>.pth``: the checkpoint, fetched from the hosted manifest with its
   sha256 checked, so Hugging Face serves the same bytes as ``from_pretrained``
 - ``openvino/<name>-{fp16,int8}.{xml,bin}``: the checkpoint exported to OpenVINO
+- ``coreml/<name>-fp16.mlpackage``: the checkpoint exported to Core ML. Build on macOS:
+  elsewhere the Core ML export is written but not checked against the model
+
+``--formats`` limits which exports are built, e.g. ``--formats coreml`` on a Mac. Uploading
+never deletes files already in a repo, so exports left out keep their uploaded copy.
 
 With ``--upload`` the repos also go into the ``Mayaku street models`` collection.
 
@@ -15,6 +20,7 @@ Run from the repo root:
 
     python tools/hf_upload.py --out /tmp/hf-street            # build only, to review
     python tools/hf_upload.py --out /tmp/hf-street --upload   # build, then upload
+    python tools/hf_upload.py --out /tmp/hf-street --formats coreml --upload   # on a Mac
     python tools/hf_upload.py --space mayaku-street           # upload hf/spaces/mayaku-street/
 
 Uploading needs ``hf auth login`` with a write token. The card text lives in
@@ -57,6 +63,21 @@ OPENVINO_MS = {
     "mayaku-m-seg-street": "50.7 ms",
 }
 COLLECTION = "Mayaku street models"
+# export target -> (file suffix, precisions). OpenVINO is built on an Intel CPU, Core ML on
+# macOS: each export is checked against the model only where its runtime runs, and OpenVINO
+# fp16 on Apple Silicon fails that check (1.98% RMS on the street nano, tolerance 1.0%).
+# No Core ML int8: on an M1 Max, macOS 26.6.2, coremltools 9.0, its Neural Engine compile
+# fails and Core ML runs it on the CPU, 160-406 ms per frame against 11-42 ms for fp16.
+FORMATS = {"openvino": ("xml", ("fp16", "int8")), "coreml": ("mlpackage", ("fp16",))}
+
+# name -> Core ML fp16 end to end, one 1920x1080 frame, M1 Max, median of 60 frames
+# (measured 2026-11-24). Re-measure when the models or the export change.
+COREML_MS = {
+    "mayaku-n-det-street": "11.4 ms",
+    "mayaku-n-seg-street": "27.2 ms",
+    "mayaku-m-det-street": "26.4 ms",
+    "mayaku-m-seg-street": "42.3 ms",
+}
 
 # tier -> (word, who it is for)
 TIERS = {
@@ -114,6 +135,7 @@ def render_card(name: str, cfg: dict) -> str:
         "conf": f"{cfg['predict']['score']:g}",
         "iou": f"{cfg['predict']['nms_iou']:g}",
         "openvino_speed": OPENVINO_MS[name],
+        "coreml_speed": COREML_MS[name],
     }
     text = CARD.read_text()
     for key, value in values.items():
@@ -144,7 +166,7 @@ def config(name: str, ckpt: Path) -> dict:
     }
 
 
-def build(out: Path) -> list[Path]:
+def build(out: Path, formats: list[str]) -> list[Path]:
     folders = []
     for name in MODELS:
         folder = out / name
@@ -154,9 +176,11 @@ def build(out: Path) -> list[Path]:
         (folder / "README.md").write_text(render_card(name, cfg))
         (folder / "config.json").write_text(json.dumps(cfg, indent=2) + "\n")
         predictor = from_pretrained(ckpt, device="cpu")
-        for precision in ("fp16", "int8"):     # each checked against the model on export
-            predictor.export("openvino", folder / "openvino" / f"{name}-{precision}.xml",
-                             precision)
+        for target in formats:
+            suffix, precisions = FORMATS[target]
+            for precision in precisions:           # each checked against the model on export
+                predictor.export(target, folder / target / f"{name}-{precision}.{suffix}",
+                                 precision)
         print(f"built {folder}")
         folders.append(folder)
     return folders
@@ -203,13 +227,17 @@ def main() -> None:
     parser.add_argument(
         "--upload", action="store_true", help="upload to Hugging Face after building"
     )
+    parser.add_argument(
+        "--formats", nargs="+", choices=list(FORMATS), default=list(FORMATS),
+        help="exports to build (default: all)",
+    )
     args = parser.parse_args()
     if args.space:
         push(f"{OWNER}/{args.space}", SPACES / args.space, repo_type="space", space_sdk="gradio")
         return
     if args.out is None:
         parser.error("--out is required unless --space is given")
-    folders = build(args.out)
+    folders = build(args.out, args.formats)
     if args.upload:
         for folder in folders:
             push(f"{OWNER}/{folder.name}", folder)
