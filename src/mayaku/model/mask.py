@@ -1,9 +1,9 @@
 """The per-instance mask head, owned once.
 
-The graph emits an 8-channel mask feature at stride s (8, or 4 with
-`Tier.mask_stride`; `stride_of` reads it off the tensors) and, per anchor, 169
+The graph emits a 16-channel mask feature at stride s (8, or 4 with
+`Tier.mask_stride`; `stride_of` reads it off the tensors) and, per anchor, 233
 numbers that are the weights and biases of a three-layer 1x1 network
-(8+2 -> 8 -> 8 -> 1, ReLU between). The host prepends two relative-coordinate
+(16+2 -> 8 -> 8 -> 1, ReLU between). The host prepends two relative-coordinate
 channels and runs that network over the detection's box. Nothing here is in
 the deploy graph; this file is what the loss, the evaluator and any host
 decoder must agree on.

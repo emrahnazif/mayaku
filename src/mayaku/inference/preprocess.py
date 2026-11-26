@@ -50,7 +50,8 @@ def read_bgr(image: ImageInput) -> npt.NDArray[np.uint8]:
 
 
 def letterbox_batch(images: Sequence[ImageInput], canvas: tuple[int, int],
-                    out: Canvases | None = None) -> tuple[Canvases, list[dict[str, Any]]]:
+                    out: Canvases | None = None,
+                    pad: bool = True) -> tuple[Canvases, list[dict[str, Any]]]:
     """Images -> (BGR canvases, letterbox metas {"ratio", "pad", "shape"}),
     each image letterboxed straight into its slot of `out` (a runtime's own
     input buffer, `Session.canvases`) or of a new array."""
@@ -60,11 +61,12 @@ def letterbox_batch(images: Sequence[ImageInput], canvas: tuple[int, int],
     metas = []
     for slot, image in zip(out, images, strict=True):
         bgr = read_bgr(image)
-        metas.append({**_letterbox_into(bgr, slot), "shape": bgr.shape[:2]})
+        metas.append({**_letterbox_into(bgr, slot, pad=pad), "shape": bgr.shape[:2]})
     return out, metas
 
 
-def _letterbox_into(img: npt.NDArray[np.uint8], out: npt.NDArray[np.uint8]) -> dict[str, Any]:
+def _letterbox_into(img: npt.NDArray[np.uint8], out: npt.NDArray[np.uint8],
+                    pad: bool = True) -> dict[str, Any]:
     """Training's `mayaku.data.geometry.letterbox`, pixel for pixel, written
     into the (H, W, 3) `out` instead of a new canvas: the image resized into
     its centred place, the rest grey (mirrors `geometry.fit` and `letterbox`;
@@ -73,10 +75,11 @@ def _letterbox_into(img: npt.NDArray[np.uint8], out: npt.NDArray[np.uint8]) -> d
     r = min(ch / h, cw / w)
     nh, nw = fitted((h, w), r)
     left, top = (cw - nw) // 2, (ch - nh) // 2
-    out[:top] = PAD
-    out[top + nh:] = PAD
-    out[top:top + nh, :left] = PAD
-    out[top:top + nh, left + nw:] = PAD
+    if pad:
+        out[:top] = PAD
+        out[top + nh:] = PAD
+        out[top:top + nh, :left] = PAD
+        out[top:top + nh, left + nw:] = PAD
     place = out[top:top + nh, left:left + nw]
     if (nw, nh) != (w, h):
         cv2.resize(img, (nw, nh), dst=place, interpolation=cv2.INTER_LINEAR)

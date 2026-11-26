@@ -17,18 +17,18 @@ import torch.nn.functional as F
 from mayaku.model.blocks import STRIDES, ConvBN, ConvBNReLU, up2x
 from mayaku.model.quant import ResidualQuant
 
-MASK_CH = 8          # channels of the mask feature
+MASK_CH = 16         # channels of the mask feature
 COORD_CH = 2         # relative-coordinate channels the host prepends
 AUX_STRIDE = STRIDES[0]   # the shared trunk's: keypoint heatmaps, stride-8 masks
 MASK4_CH = 16        # width of the stride-4 mask path (`mask_stride` 4)
-# the checkpoint prefix of every mask-feature weight (mask, or mask_up /
-# mask_skip / mask4): what a change of mask stride replaces
+# the checkpoint prefix of every mask-feature weight (mask_conv / mask, or
+# mask_up / mask_skip / mask4): what a change of mask stride replaces
 MASK_KEYS = "aux.mask"
 # Per-instance mask head applied on the host: three 1x1 layers
 # (MASK_CH + COORD_CH) -> 8 -> 8 -> 1 with biases, ReLU between. The kernel
 # controller emits exactly this many numbers per anchor.
 KERNEL_LAYOUT = ((MASK_CH + COORD_CH, 8), (8, 8), (8, 1))
-KERNEL_PARAMS = sum(i * o + o for i, o in KERNEL_LAYOUT)   # 169
+KERNEL_PARAMS = sum(i * o + o for i, o in KERNEL_LAYOUT)   # 233
 
 
 class AuxBranch(nn.Module):
@@ -64,7 +64,7 @@ class AuxBranch(nn.Module):
                  mask_stride=AUX_STRIDE, stem=0):
         super().__init__()
         self.seg, self.kpt, self.arm = seg, kpt, arm
-        c3, c4, c5 = cin
+        c3, c4, c5 = cin[:3]   # the trunk reads strides 8-32; a stride-64 level only adds a kernel map
         self.p3 = ConvBN(c3, width, 3)
         self.p4 = ConvBN(c4, width, 1)
         self.p5 = ConvBN(c5, width, 1)
@@ -73,6 +73,7 @@ class AuxBranch(nn.Module):
         self.rq_p4, self.rq_p5, self.rq_sum = ResidualQuant(), ResidualQuant(), ResidualQuant()
         # two 1x1s on the same trunk output (a runtime may merge them into
         # one conv, by the same block-separability SPPFAdd relies on)
+        self.mask_conv = ConvBNReLU(width, width, 3) if seg else None
         self.mask = self.mask4 = self.mask_up = self.mask_skip = None
         if seg and mask_stride == AUX_STRIDE:
             self.mask = nn.Conv2d(width, MASK_CH, 1)
@@ -109,10 +110,11 @@ class AuxBranch(nn.Module):
         per = boxes if self.tower is None else [t(x) for t, x in zip(self.tower, feats, strict=True)]
         out = []
         if self.seg:
+            mf = self.mask_conv(f)
             if self.mask4 is None:
-                m = self.mask(f)
+                m = self.mask(mf)
             else:
-                m = self.mask4(F.relu(self.mask_skip(stem) + self.rq_mask(up2x(self.mask_up(f)))))
+                m = self.mask4(F.relu(self.mask_skip(stem) + self.rq_mask(up2x(self.mask_up(mf)))))
             out += [m] + [k(x) for k, x in zip(self.ker, per, strict=True)]
         if self.kpt:
             out += [self.heat(f)] + [k(x) for k, x in zip(self.kp, per, strict=True)]

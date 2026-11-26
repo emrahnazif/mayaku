@@ -13,7 +13,11 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import math
+from collections.abc import Mapping
+from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import torch
 
 from mayaku.backends.ops.nms import batched_nms
@@ -22,11 +26,11 @@ from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
 from mayaku.model import obb as obblib
 from mayaku.model.blocks import STRIDES
-from mayaku.model.box import anchor_grid, decode_boxes, flatten_head
+from mayaku.model.box import anchor_grid, decode_boxes, flatten_head, flatten_levels
 from mayaku.model.detector import split_outputs
 
 __all__ = ["DEPLOY", "PREDICT", "Classification", "Decode", "Detections", "PredictDecode", "decode",
-           "decode_sidecar", "host_side", "postprocess", "predict_decode"]
+           "decode_candidates", "decode_sidecar", "host_side", "postprocess", "predict_decode"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -135,7 +139,65 @@ class Classification:
         return list(zip(i.tolist(), p.tolist(), strict=True))
 
 
-def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
+def _nms_sorted_numpy(arr: npt.NDArray[np.float32], iou: float, max_det: int) -> list[int]:
+    """Greedy class-aware NMS over rows ``(n, 6)`` already sorted descending by score."""
+    n = len(arr)
+    if n <= 1:
+        return list(range(n)) if max_det > 0 else []
+    x1, y1, x2, y2, lb = arr[:, 0], arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 5]
+    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    suppressed = np.zeros(n, dtype=bool)
+    keep: list[int] = []
+    for i in range(n):
+        if suppressed[i]:
+            continue
+        keep.append(i)
+        if len(keep) == max_det:
+            break
+        if i + 1 < n:
+            j = slice(i + 1, n)
+            ix1 = np.maximum(x1[i], x1[j])
+            iy1 = np.maximum(y1[i], y1[j])
+            ix2 = np.minimum(x2[i], x2[j])
+            iy2 = np.minimum(y2[i], y2[j])
+            inter = np.maximum(0.0, ix2 - ix1) * np.maximum(0.0, iy2 - iy1)
+            union = areas[i] + areas[j] - inter
+            suppressed[j] |= (lb[j] == lb[i]) & (inter > iou * union)
+    return keep
+
+
+def decode_candidates(packed: torch.Tensor, meta: Mapping[str, Any], d: Decode) -> Detections:
+    """Sorted ``(K, 6)`` ``[x1, y1, x2, y2, logit, label]`` CPU candidates
+    (from a fused device top-K + DFL pass) -> ``Detections`` in original pixels."""
+    arr = packed.numpy()
+    floor = math.log(d.conf / (1.0 - d.conf))
+    # arr[:, 4] is descending, so -arr[:, 4] is ascending; "left" enforces strictly > floor
+    n = int(np.searchsorted(-arr[:, 4], -floor, side="left"))
+    if n == 0 or d.max_det <= 0:
+        return Detections(torch.zeros((0, 4), dtype=torch.float32),
+                          torch.zeros((0,), dtype=torch.float32),
+                          torch.zeros((0,), dtype=torch.int64))
+    ratio, (left, top), (oh, ow) = meta["ratio"], meta["pad"], meta["shape"]
+    if n <= 128:
+        keep = _nms_sorted_numpy(arr[:n], d.iou, d.max_det)
+        out = arr[keep]
+        bx = out[:, :4].copy()
+        bx[:, 0::2] = np.clip((bx[:, 0::2] - left) / ratio, 0.0, float(ow))
+        bx[:, 1::2] = np.clip((bx[:, 1::2] - top) / ratio, 0.0, float(oh))
+        logits = out[:, 4]
+        scores = (1.0 / (1.0 + np.exp(-logits))).astype(np.float32, copy=False)
+        labels = out[:, 5].astype(np.int64)
+        return Detections(torch.from_numpy(bx), torch.from_numpy(scores), torch.from_numpy(labels))
+    sub = packed[:n]
+    boxes_c = sub[:, :4]
+    scores_t = sub[:, 4].sigmoid()
+    labels_t = sub[:, 5].long()
+    keep_t = batched_nms(boxes_c, scores_t, labels_t, d.iou)[:d.max_det]
+    return Detections(unletterbox(boxes_c[keep_t], ratio, (left, top), (oh, ow)),
+                      scores_t[keep_t], labels_t[keep_t])
+
+
+def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None, strides=STRIDES):
     """Head outputs -> (dets, idxs, points, stride): per image an (n, 6)
     [x1, y1, x2, y2, score, class] tensor in canvas pixels and the anchor
     index each surviving detection came from, plus the shared anchor points
@@ -151,8 +213,14 @@ def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
     box arithmetic touch tens of anchors instead of every one (8400 at
     640x640), through the same `decode_boxes` training uses.
     """
-    cls, dist, shapes = flatten_head(preds[:2 * len(STRIDES)], nc, reg_max, contiguous=ang is not None)
-    points, stride = anchor_grid(shapes, STRIDES, device=cls.device, dtype=cls.dtype)
+    if ang is not None:
+        cls, dist, shapes = flatten_head(preds[:2 * len(strides)], nc, reg_max, contiguous=True)
+    else:
+        cls_maps = preds[:2 * len(strides):2]
+        shapes = [tuple(c.shape[2:]) for c in cls_maps]
+        cls = flatten_levels(cls_maps, nc)
+        dist = None
+    points, stride = anchor_grid(shapes, strides, device=cls.device, dtype=cls.dtype)
     rboxes = None if ang is None else obblib.decode_head(ang, dist, points, stride, reg_max)
     floor = math.log(d.conf / (1 - d.conf))
     out, idxs = [], []
@@ -165,6 +233,11 @@ def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
             best, lab = logits.max(1)
             anchor = (best > floor).nonzero().squeeze(1)
             score, lab = best[anchor].sigmoid(), lab[anchor]
+        if len(score) == 0:
+            cols = 11 if rboxes is not None else 6
+            out.append(torch.zeros((0, cols), device=cls.device, dtype=torch.float32))
+            idxs.append(anchor)
+            continue
         if len(score) > d.topk:
             keep = score.topk(d.topk).indices
             score, lab, anchor = score[keep], lab[keep], anchor[keep]
@@ -174,6 +247,8 @@ def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
             out.append(torch.cat((obblib.to_xyxy(box[keep]), score[keep, None],
                                   lab[keep, None].float(), box[keep]), 1))
         else:
+            if dist is None:
+                dist = flatten_levels(preds[1:2 * len(strides):2], 4 * reg_max)
             box = decode_boxes(dist[b, anchor], points[anchor], stride[anchor], reg_max)
             keep = batched_nms(box, score, lab, d.iou)[:d.max_det]
             out.append(torch.cat((box[keep], score[keep, None], lab[keep, None].float()), 1))
@@ -182,7 +257,8 @@ def postprocess(preds, nc, reg_max, d=DEPLOY, ang=None):
 
 
 @torch.no_grad()
-def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=None, obb=False):
+def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=None, obb=False,
+           strides=STRIDES):
     """The model's flat output list for a batch -> one `Detections` per image.
 
     `metas` are the letterbox metas ({"ratio", "pad", "shape"}) of the batch's
@@ -194,8 +270,8 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=No
     evaluator's RLE, `rle_crops`), so full-frame masks never exist.
     """
     preds = host_side(preds)
-    grp = split_outputs(preds, seg=seg, kpt=kpt, obb=obb)
-    dets, idxs, points, stride = postprocess(preds, nc, reg_max, d, grp.get("ang"))
+    grp = split_outputs(preds, seg=seg, kpt=kpt, obb=obb, strides=strides)
+    dets, idxs, points, stride = postprocess(preds, nc, reg_max, d, grp.get("ang"), strides=strides)
     # flatten the aux maps once for the whole batch, not per image
     kflat = masklib.flatten_ker(grp["ker"]) if seg else None
     ms = masklib.stride_of(grp["mask"], grp["head"][0]) if seg else None
@@ -280,4 +356,5 @@ def decode_sidecar(preds, metas, sidecar, conf=None, encode_mask=None,
     kp = sidecar["keypoints"]
     return decode(preds, metas, len(sidecar["class_names"]), dec["reg_max"],
                   seg=sidecar["mask"] is not None, kpt=kp["num"] if kp else 0, d=d,
-                  encode_mask=encode_mask, obb=bool(sidecar.get("obb")))
+                  encode_mask=encode_mask, obb=bool(sidecar.get("obb")),
+                  strides=tuple(dec.get("strides", STRIDES)))

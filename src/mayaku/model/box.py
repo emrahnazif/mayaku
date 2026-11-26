@@ -61,15 +61,15 @@ def flatten_head(preds, nc, reg_max, contiguous=True):
     return (cls.contiguous(), dist.contiguous(), shapes) if contiguous else (cls, dist, shapes)
 
 
-def decode_head(preds, nc, reg_max):
-    """The head's six tensors -> everything downstream needs from them: flat
+def decode_head(preds, nc, reg_max, strides=STRIDES):
+    """The head's tensors -> everything downstream needs from them: flat
     logits, flat bin logits, decoded boxes in pixels, and the anchor grid they
     were decoded against. One owner, so the training decode and the deployed
     decode cannot drift apart."""
     # the model may append auxiliary tensors (masks, keypoints) after the
     # head's own; the detection decode reads exactly two per level
-    cls, dist, shapes = flatten_head(preds[:2 * len(STRIDES)], nc, reg_max)
-    points, stride = anchor_grid(shapes, STRIDES, device=cls.device, dtype=cls.dtype)
+    cls, dist, shapes = flatten_head(preds[:2 * len(strides)], nc, reg_max)
+    points, stride = anchor_grid(shapes, strides, device=cls.device, dtype=cls.dtype)
     return cls, dist, decode_boxes(dist, points, stride, reg_max), points, stride, shapes
 
 
@@ -78,6 +78,12 @@ def decode_boxes(dist, points, stride, reg_max):
     Any subset of anchors, with their points and strides: the deployed decode
     runs it on the anchors that pass the score threshold only."""
     return ltrb_to_xyxy(dfl_expectation(dist, reg_max), points, stride)
+
+
+@functools.lru_cache(maxsize=16)
+def _dfl_bins(reg_max: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Cached 0..reg_max-1 bin centres for `dfl_expectation`."""
+    return torch.arange(reg_max, device=device, dtype=dtype)
 
 
 def dfl_expectation(logits, reg_max):
@@ -89,8 +95,7 @@ def dfl_expectation(logits, reg_max):
     Eq. 5 with unit bin spacing. The bins here are 0..reg_max-1.
     """
     p = logits.unflatten(-1, (4, reg_max)).softmax(-1)
-    bins = torch.arange(reg_max, device=logits.device, dtype=logits.dtype)
-    return (p * bins).sum(-1)
+    return p @ _dfl_bins(reg_max, logits.device, logits.dtype)
 
 
 def ltrb_to_xyxy(dist, points, stride=None):

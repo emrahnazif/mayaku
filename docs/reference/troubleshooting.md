@@ -109,9 +109,9 @@ The training split given to `--resume` has different classes from the original r
 
 A config field name is misspelled or doesn't exist. The error names the path, for example `train.lerning_rate`. Field names are listed in [Configuration](/docs/reference/configuration.md).
 
-### `canvas (650, 650): both sides must be multiples of 32`
+### `canvas (650, 650): both sides must be multiples of 32` / `multiples of 64`
 
-`input.size_budget` and `input.canvas_hw` must be multiples of 32. Use, for example, 640 or 672.
+`input.size_budget` must be a multiple of 32, and `input.canvas_hw` must be a multiple of the tier's coarsest stride (64 for v4 detection tiers, 32 for classifiers). Use, for example, 640 or 768.
 
 ### `Assertion failed, adam`
 

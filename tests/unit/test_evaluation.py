@@ -167,12 +167,13 @@ def test_box_masks_equal_the_full_frame_path(mask_stride) -> None:
     letterboxed and not, with boxes touching the frame's edges."""
     from mayaku.data.geometry import unletterbox_maps
     from mayaku.model import mask as masklib
+    from mayaku.model.aux import KERNEL_PARAMS, MASK_CH
 
     g = torch.Generator().manual_seed(0)
     s, (hs, ws) = mask_stride, (64 // mask_stride, 96 // mask_stride)
-    feat = torch.randn(8, hs, ws, generator=g)
+    feat = torch.randn(MASK_CH, hs, ws, generator=g)
     n = 40
-    kernels = torch.randn(n, 169, generator=g) * 0.5
+    kernels = torch.randn(n, KERNEL_PARAMS, generator=g) * 0.5
     xy = torch.rand(n, 2, generator=g) * torch.tensor([96.0, 64.0])
     wh = torch.rand(n, 2, generator=g) * torch.tensor([60.0, 40.0]) + 1
     boxes = torch.cat((xy - wh / 2, xy + wh / 2), 1)

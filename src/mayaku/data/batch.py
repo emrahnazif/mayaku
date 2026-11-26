@@ -80,8 +80,9 @@ def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0, obb=False):
     """Resize one rendered batch to `size` (h, w) for multi-scale
     training (`mayaku.data.canvas.multi_scale_canvases` gives the sizes).
 
-    The dataset renders at the operating point, the maximum; this downscales
-    the batch, so there is only ever one resize and it never invents detail.
+    The dataset renders at the top rung (`mayaku.data.canvas.render_canvas`);
+    this downscales the batch, so there is only ever one resize and it never
+    invents detail.
     Box and keypoint x / y scale by the same per-axis ratios as the image, and
     an oriented box's centre too, its sides by the geometric mean of the
     two (the ratios differ only by the canvas's rounding to the stride, and

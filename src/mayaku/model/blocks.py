@@ -30,22 +30,25 @@ from torch.nn.utils.fusion import fuse_conv_bn_eval, fuse_conv_bn_weights
 
 from mayaku.model.quant import ResidualQuant
 
-# The stem takes stride 4 and each of the three stages takes another factor
-# of two, so these are structural, not configurable. Everything that needs to
-# know a stride imports this rather than repeating it.
-STRIDES = (8, 16, 32)
+# The stem takes stride 4 and each stage another factor of two, so a level's
+# stride is fixed by its index: a tier with three stages detects at strides
+# 8 / 16 / 32, one with four adds stride 64 (`Tier.strides`). STRIDES is the
+# three-level layout, the default wherever a level count is not passed.
+LEVEL_STRIDES = (8, 16, 32, 64)
+STRIDES = LEVEL_STRIDES[:3]
+S32 = LEVEL_STRIDES.index(32)   # the stride-32 level's index, whatever the level count
 
-# Every input canvas side is a multiple of the coarsest stride: the stride-32
-# level needs it, and so does the aux branch's exact 4x upsample from stride
-# 32 onto stride 8.
+# Every input canvas side is a multiple of the model's coarsest stride
+# (`Tier.align`): each level's grid needs it, and so does every exact 2x
+# upsample between levels. 32 is the smallest any tier accepts.
 CANVAS_ALIGN = STRIDES[-1]
 
 
-def as_canvas(canvas):
-    """A side or an (H, W) pair -> (H, W), both multiples of CANVAS_ALIGN."""
+def as_canvas(canvas, align=CANVAS_ALIGN):
+    """A side or an (H, W) pair -> (H, W), both multiples of `align`."""
     hw = (canvas, canvas) if isinstance(canvas, int) else tuple(canvas)
-    assert len(hw) == 2 and all(d > 0 and d % CANVAS_ALIGN == 0 for d in hw), \
-        "canvas %s: both sides must be multiples of %d" % (hw, CANVAS_ALIGN)
+    assert len(hw) == 2 and all(d > 0 and d % align == 0 for d in hw), \
+        "canvas %s: both sides must be multiples of %d" % (hw, align)
     return hw
 
 
@@ -270,6 +273,23 @@ class Bottleneck(nn.Module):
 
     def forward(self, x):
         return F.relu(self.expand(self.spatial(self.reduce(x))) + self.rq(x))
+
+
+class BasicBlock(nn.Module):
+    """3x3 -> 3x3 -> add, at full width: the residual pair `Bottleneck` is the
+    cheap form of. The second BN starts at zero, so the block starts as the
+    identity, and the skip operand is quantized for int8 add fusion, as in
+    `Bottleneck`."""
+
+    def __init__(self, c):
+        super().__init__()
+        self.conv1 = ConvBNReLU(c, c, 3)
+        self.conv2 = ConvBN(c, c, 3)
+        nn.init.zeros_(self.conv2.bn.weight)
+        self.rq = ResidualQuant()
+
+    def forward(self, x):
+        return F.relu(self.conv2(self.conv1(x)) + self.rq(x))
 
 
 class Stem(nn.Module):

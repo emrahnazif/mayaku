@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- v4 detector architecture for medium and large objects (requires fresh O365 base pretraining; not
+  weight-compatible with v3 checkpoints):
+  - All detection tiers (`n`, `s`, `m`, `l`) add a fourth stride-64 level (`strides=[8, 16, 32, 64]`,
+    canvas sides aligned to 64, default `input.size_budget` updated from `800` to `768`, giving
+    `768×768` for square/mixed datasets and `576×1024` for 16:9), two extra
+    backbone bottlenecks and a residual `3×3→3×3` class block at stride 32, and widened stride-32 /
+    stride-64 head towers.
+  - Neck bottom-up downsamples (`FPGStage.down`) now use `3×3` stride-2 convolutions instead of `1×1`
+    stride-2 so every row and column participates in coarse-level features.
+  - Instance mask branch widens `MASK_CH` from `8` to `16` (dynamic kernel length `233`) and adds a
+    `3×3` convolution after the multi-scale feature sum before mask readout.
+  - Multi-scale training supports `train.multiscale_max` above the deploy canvas (`render_canvas` +
+    `multi_scale_canvases`) so batches render at the upper size and scale across budgets both below
+    and above deployment size while evaluation remains at the deploy canvas.
+  - Faster TensorRT single-image detection inference (`ArtifactPredictor` / `TensorRTSession`):
+    caches letterbox border padding when image placement matches, folds top-K selection and DFL box
+    decoding into the TensorRT CUDA graph with async pinned-memory copy of the candidates, caches DFL
+    bin centres (`_dfl_bins`), and runs sorted host NMS + unletterboxing (`decode_candidates`). On
+    an RTX 3060 over 2,000 COCO `val2017` images (`conf=0.25`, `decode="eval"`), `mayaku4` at
+    `768×768` measures (`net` / `e2e` median): `n` `1.74 / 2.58 ms` (`fp16`), `1.25 / 2.10 ms`
+    (`int8`); `s` `3.08 / 3.89 ms` (`fp16`), `1.91 / 2.73 ms` (`int8`); `m` `5.73 / 6.51 ms`
+    (`fp16`), `3.22 / 4.03 ms` (`int8`); `l` `8.61 / 9.29 ms` (`fp16`), `4.49 / 5.31 ms` (`int8`);
+    and on `mayaku3-n` at `800×800`, end-to-end latency drops from `2.83 / 2.30 ms` to
+    `2.40 / 1.88 ms` (`fp16 / int8`).
+
 - int8 ONNX files are a quarter of the size and run as int8 in onnxruntime. Weights were stored
   as fp32 behind a quantize step, so the file was as large as fp32 and onnxruntime ran every conv
   in float between extra quantize and dequantize steps, slower than the fp32 file. Weights are now

@@ -31,6 +31,7 @@ from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_heade
 from mayaku.inference.export.onnx import onnx_graph
 from mayaku.inference.preprocess import Canvases, planar_tensor
 from mayaku.model import Detector
+from mayaku.model.box import anchor_grid, dfl_expectation, ltrb_to_xyxy
 from mayaku.utils.requirements import require
 
 PRECISIONS = ("fp16", "int8", "fp32")
@@ -138,21 +139,96 @@ class Session:
             self._ctx.set_tensor_address(n, t.data_ptr())
         self.outputs = outputs
         self._graph: torch.cuda.CUDAGraph | None = None
+        self._box_graphs: dict[tuple[int, int, tuple[int, ...], int, bool],
+                               tuple[torch.cuda.CUDAGraph, torch.Tensor]] = {}
+        self._pad_place: tuple[int, int] | None = None
 
     def canvases(self, n: int) -> Canvases | None:
         """The pinned upload buffer, once the last upload has left it; the
         caller letterboxes into it and `__call__` sends it without a copy."""
         if n > self.batch:
             return None
+        self._pad_place = None
         self._wait()
         return self._host.numpy()[:n]
+
+    def box_canvases(self) -> Canvases:
+        """The batch-1 pinned upload buffer preserving `_pad_place` for `_predict_one`."""
+        self._wait()
+        return self._host.numpy()[:1]
+
+    def need_pad(self, placement: tuple[int, int]) -> bool:
+        """Whether the slot-0 canvas border needs filling before resizing to `placement`."""
+        if self._pad_place == placement:
+            return False
+        self._pad_place = placement
+        return True
+
+    def _stage_input(self, x: Canvases) -> None:
+        if x.ctypes.data != self._host.data_ptr():
+            self._pad_place = None
+            self._wait()
+            self._host.numpy()[:len(x)] = x
+
+    def forward_boxes(self, x: Canvases, nc: int, reg_max: int, strides: tuple[int, ...],
+                      topk: int, multi_label: bool) -> torch.Tensor:
+        """Batch-1 fused CUDA graph: upload, planar RGB, TensorRT inference,
+        top-K + DFL box decode and async copy of ``(K, 6)`` candidates to
+        pinned CPU memory."""
+        key = (nc, reg_max, strides, topk, multi_label)
+        pair = self._box_graphs.get(key)
+        if pair is None:
+            pair = self._capture_boxes(*key)
+            self._box_graphs[key] = pair
+        graph, host_out = pair
+        self._stage_input(x)
+        with torch.cuda.device(self._device):
+            self._pixels.copy_(self._host, non_blocking=True)
+            graph.replay()
+            torch.cuda.current_stream(self._device).synchronize()
+        self._pending = False
+        return host_out
+
+    def _run_boxes(self, nc: int, reg_max: int, strides: tuple[int, ...], k: int,
+                   multi_label: bool, host_out: torch.Tensor) -> None:
+        self._run()
+        n_maps = 2 * len(strides)
+        cls_maps = [self._out[n] for n in self.outputs[:n_maps:2]]
+        box_maps = [self._out[n] for n in self.outputs[1:n_maps:2]]
+        points, stride = anchor_grid([tuple(c.shape[2:]) for c in cls_maps], strides,
+                                     device=self._device, dtype=torch.float32)
+        logits = torch.cat([m.reshape(nc, -1) for m in cls_maps], 1)
+        n_anchors = logits.shape[1]
+        if multi_label:
+            top, idx = logits.reshape(-1).topk(k)
+            lab, anc = idx // n_anchors, idx % n_anchors
+        else:
+            best, labs = logits.max(0)
+            top, anc = best.topk(k)
+            lab = labs[anc]
+        dist = torch.cat([m.reshape(4 * reg_max, -1) for m in box_maps], 1)[:, anc].t()
+        ltrb = dfl_expectation(dist, reg_max) * stride[anc]
+        xyxy = ltrb_to_xyxy(ltrb, points[anc])
+        host_out.copy_(torch.cat((xyxy, top[:, None], lab[:, None].float()), 1), non_blocking=True)
+
+    def _capture_boxes(self, nc: int, reg_max: int, strides: tuple[int, ...], topk: int,
+                       multi_label: bool) -> tuple[torch.cuda.CUDAGraph, torch.Tensor]:
+        n_anchors = sum(self._out[n].shape[2] * self._out[n].shape[3]
+                        for n in self.outputs[:2 * len(strides):2])
+        k = min(topk, n_anchors * nc if multi_label else n_anchors)
+        host_out = torch.empty((k, 6), dtype=torch.float32).pin_memory()
+        with torch.cuda.device(self._device):
+            self._run_boxes(nc, reg_max, strides, k, multi_label, host_out)
+            torch.cuda.current_stream(self._device).synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                self._run_boxes(nc, reg_max, strides, k, multi_label, host_out)
+        return graph, host_out
 
     def __call__(self, x: Canvases) -> list[torch.Tensor]:
         # no sync after the upload: work on the maps is ordered after the
         # engine on this stream
-        if x.ctypes.data != self._host.data_ptr():
-            self._wait()
-            self._host.numpy()[:len(x)] = x
+        self._stage_input(x)
         self._pixels.copy_(self._host, non_blocking=True)
         self._uploaded.record(torch.cuda.current_stream(self._device))
         self._pending = True

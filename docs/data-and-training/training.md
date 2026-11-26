@@ -107,14 +107,14 @@ Two shortcuts set common fields: `num_epochs` / `--epochs` sets `train.epochs`, 
 
 Every image is resized, preserving its aspect ratio, and padded onto one fixed rectangle called the **canvas** (letterboxing). The same canvas is used for training, evaluation, export and deployment.
 
-- `input.size_budget` (default `800`) is the compute dial. The canvas never has more than `size_budget²` pixels.
-- The canvas shape follows your data. If nearly all training images share one aspect ratio, the canvas takes that ratio, so a 16:9 dataset at budget 800 trains on a 576×1024 canvas instead of 800×800 with padding bars. Mixed aspect ratios get a square canvas.
-- Both sides are always multiples of 32.
+- `input.size_budget` (default `768`) is the compute dial. The canvas never has more than `size_budget²` pixels.
+- The canvas shape follows your data. If nearly all training images share one aspect ratio, the canvas takes that ratio, so a 16:9 dataset at budget 768 trains on a 576×1024 canvas instead of 768×768 with padding bars. Mixed aspect ratios get a square canvas.
+- Both sides are always multiples of the tier's coarsest stride (64 for v4 detection tiers).
 
 | Size budget | 1:1 data | 4:3 data | 16:9 data |
 |---|---|---|---|
-| 640 | 640×640 | 544×736 | 480×832 |
-| 800 (default) | 800×800 | 672×896 | 576×1024 |
+| 640 | 640×640 | 576×704 | 448×832 |
+| 768 (default) | 768×768 | 640×896 | 576×1024 |
 
 (Height × width.)
 
@@ -307,7 +307,7 @@ The per-epoch records, with every loss term and metric, are in `train/log.jsonl`
 | `val_annotations` | `--val-annotations` | `None` | Validation COCO JSON. Pass it together with `val_images`. |
 | `val_images` | `--val-images` | `None` | Validation image directory, or class-folder root. |
 | `output_dir` | `--output` | `runs/<name>` | Run directory. |
-| `size_budget` | `--size-budget` | `None` (800) | Sets `input.size_budget`. |
+| `size_budget` | `--size-budget` | `None` (768) | Sets `input.size_budget`. |
 | `num_epochs` | `--epochs` | `None` | Sets `train.epochs`. |
 | `overrides` | `--set key=value` | `None` | Nested mapping of config fields. |
 | `device` | `--device` | `"auto"` | `auto`, `cuda`, `cuda:N`, `mps` or `cpu`. |

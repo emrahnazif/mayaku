@@ -9,19 +9,21 @@ anywhere in the graph.
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mayaku.model.blocks import STRIDES, Bottleneck, ConvBN, ConvBNReLU, DenseOut, per_level, up2x
+from mayaku.model.blocks import Bottleneck, ConvBN, ConvBNReLU, DenseOut, per_level, up2x
 from mayaku.model.quant import ResidualQuant
 
 
 class FPGStage(nn.Module):
-    """One pathway. Levels are ordered fine to coarse: [s8, s16, s32].
+    """One pathway. Levels are ordered fine to coarse: [s8, s16, s32(, s64)].
 
         same   1x1 conv, level i -> level i
         up     coarse to fine: 1x1 conv, then 2x nearest. A 1x1 conv commutes
                exactly with nearest upsampling, so running it at the coarse
                resolution is the same function at a quarter of the cost.
-        down   fine to coarse: 1x1 stride-2 conv. Carried only by the last
-               pathway(s); it is the neck's sole bottom-up flow.
+        down   fine to coarse: 3x3 stride-2 conv. Carried only by the last
+               pathway(s); it is the neck's sole bottom-up flow. A 3x3 covers
+               every input cell instead of subsampling every other row and
+               column like a 1x1 stride-2.
         skip   1x1 conv from two pathways back, same level.
 
     After fusion every level's sum is processed at its own resolution by a
@@ -40,7 +42,7 @@ class FPGStage(nn.Module):
         self.same = nn.ModuleList(ConvBN(c[i], c[i], 1) for i in range(nl))
         self.up = nn.ModuleList(ConvBN(c[i + 1], c[i], 1) for i in range(nl - 1))
         self.down = nn.ModuleList(
-            ConvBN(c[i], c[i + 1], 1, 2) for i in range(nl - 1)) if down else None
+            ConvBN(c[i], c[i + 1], 3, 2) for i in range(nl - 1)) if down else None
         self.skip = nn.ModuleList(ConvBN(c[i], c[i], 1) for i in range(nl)) if skip else None
         self.proc = nn.ModuleList(Bottleneck(c[i], 2) for i in range(nl))
         # Each level's sum is built as conv + quantized running sum, one conv
@@ -74,7 +76,7 @@ class FPG(nn.Module):
 
     def __init__(self, cin, ch, n_path):
         super().__init__()
-        nl = len(STRIDES)
+        nl = len(cin)
         c = per_level(ch, nl)
         self.lateral = nn.ModuleList(ConvBNReLU(a, b, 1) for a, b in zip(cin, c, strict=True))
         self.paths = nn.ModuleList(

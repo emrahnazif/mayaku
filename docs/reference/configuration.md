@@ -105,8 +105,8 @@ The canvas: the fixed input size every image is letterboxed onto, for training, 
 
 | Field | Default | Meaning |
 |---|---|---|
-| `input.size_budget` | `800` | The canvas has at most `size_budget²` pixels. Must be a multiple of 32. The command-line shortcut is `--size-budget`. For classifiers the default is 224. |
-| `input.canvas_hw` | `null` | The canvas `[height, width]`. `null` lets auto-config pick the shape that fits your data's aspect ratio under the budget. Set it to fix the canvas exactly. Both sides must be multiples of 32. |
+| `input.size_budget` | `768` | The canvas has at most `size_budget²` pixels. Must be a multiple of 32. The command-line shortcut is `--size-budget`. For classifiers the default is 224. |
+| `input.canvas_hw` | `null` | The canvas `[height, width]`. `null` lets auto-config pick the shape that fits your data's aspect ratio under the budget. Set it to fix the canvas exactly. Sides must be multiples of the tier's coarsest stride (64 for all detection tiers). |
 
 See [Training: input size](/docs/data-and-training/training.md#input-size).
 
@@ -144,7 +144,8 @@ The training recipe. The defaults are the tuned recipe. Fine-tuning runs change 
 | `train.ema_decay` | `0.9999` | Decay of the exponential moving average of the weights. The EMA weights are what is evaluated and saved. |
 | `train.ema_tau` | `2000.0` | Ramp of the EMA decay in steps, so the average is useful from the first steps. |
 | `train.recalibrate_images` | `640` | Before each evaluation and checkpoint, BatchNorm statistics of the EMA model are recomputed over this many unaugmented training images. `0` turns it off. |
-| `train.multiscale` | `0` | Multi-scale training: the smallest size budget to train at, `0` for off. Each batch is downscaled to a random size between this budget and the canvas. Evaluation always uses the canvas. It usually costs accuracy at the canvas size. Use it only if you will deploy smaller than you train. |
+| `train.multiscale` | `0` | Multi-scale training: the smallest size budget to train at, `0` to start at the deploy canvas. Evaluation always uses the deploy canvas. |
+| `train.multiscale_max` | `0` | Multi-scale training upper size budget above the deploy canvas, `0` to keep the deploy canvas as the largest rung. Batches render at this size and downscale across `[multiscale .. multiscale_max]`, so large objects also train above deploy scale without hurting evaluation. |
 
 ### Loss and label assignment
 

@@ -35,11 +35,14 @@ def _sidecar(cfg, names=NAMES, **kw):
 
 
 def test_sidecar_describes_the_deploy_contract() -> None:
-    s = _sidecar(_cfg(), provenance={"run": "unit"})
+    cfg = _cfg()
+    s = _sidecar(cfg, provenance={"run": "unit"})
+    strides = cfg.model.to_tier().strides
     assert s["schema_version"] == SIDECAR_SCHEMA_VERSION == 2
     assert s["class_names"] == NAMES and s["canvas_hw"] == [576, 1024]
-    assert s["outputs"] == output_names() == ["cls0", "box0", "cls1", "box1", "cls2", "box2"]
-    assert s["decode"]["strides"] == [8, 16, 32] and s["decode"]["reg_max"] == 16
+    assert s["outputs"] == output_names(strides=strides) == [
+        "cls0", "box0", "cls1", "box1", "cls2", "box2", "cls3", "box3"]
+    assert s["decode"]["strides"] == [8, 16, 32, 64] and s["decode"]["reg_max"] == 16
     assert s["preprocess"]["pad_value"] == 114 and s["preprocess"]["channels"] == "RGB"
     assert s["mask"] is None and s["keypoints"] is None
     assert s["quant"]["qat"] is True                     # every tier builds quantization-aware
@@ -49,9 +52,10 @@ def test_sidecar_describes_the_deploy_contract() -> None:
 
 def test_sidecar_carries_mask_and_keypoint_decode_constants() -> None:
     kp = KeypointConfig(num=3, names=("left_a", "right_a", "c"), flip_pairs=((0, 1),))
-    s = _sidecar(_cfg(tier="m", seg=True, keypoints=kp, qat=False))
-    assert s["outputs"] == output_names(seg=True, kpt=3)
-    assert s["mask"]["kernel_layout"] == [[10, 8], [8, 8], [8, 1]] and s["mask"]["stride"] == 8
+    cfg = _cfg(tier="m", seg=True, keypoints=kp, qat=False)
+    s = _sidecar(cfg)
+    assert s["outputs"] == output_names(seg=True, kpt=3, strides=cfg.model.to_tier().strides)
+    assert s["mask"]["kernel_layout"] == [[18, 8], [8, 8], [8, 1]] and s["mask"]["stride"] == 8
     assert s["keypoints"] == {"num": 3, "sigmas": [0.05] * 3,
                               "names": ["left_a", "right_a", "c"], "flip_pairs": [[0, 1]]}
     assert s["quant"]["qat"] is False                    # qat=False builds fp32

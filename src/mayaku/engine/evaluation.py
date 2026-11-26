@@ -377,7 +377,8 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
             preds = model(batch_to(imgs, device))
             # masks RLE-encoded chunk by chunk: never a whole image's at once
             dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d,
-                          encode_mask=rle_crops if seg else None, obb=obb)
+                          encode_mask=rle_crops if seg else None, obb=obb,
+                          strides=model.cfg.strides)
             yield from ((meta["id"], det) for meta, det in zip(metas, dets, strict=True))
 
     try:

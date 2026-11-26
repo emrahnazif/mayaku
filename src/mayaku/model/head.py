@@ -1,10 +1,19 @@
-"""Detection head: three scales, a decoupled class / box tower per scale, raw logits out."""
+"""Detection head: one decoupled class / box tower per scale, raw logits out."""
 
 import math
 
 import torch.nn as nn
 
-from mayaku.model.blocks import STRIDES, Fusible, fuse_bn_chain, per_level
+from mayaku.model.blocks import (
+    LEVEL_STRIDES,
+    S32,
+    STRIDES,
+    BasicBlock,
+    Fusible,
+    fuse_bn_chain,
+    fuse_tree,
+    per_level,
+)
 
 
 class Head(Fusible):
@@ -29,12 +38,17 @@ class Head(Fusible):
     `obb` adds one angle logit per cell, a 1x1 on the box tower beside the
     side distances, which the host turns into the box's rotation
     (`mayaku.model.obb`); the sides are then measured along the box's axes.
+
+    `cls32` adds a residual pair of 3x3s to the stride-32 class tower,
+    started as the identity: the class at stride 32 is read from a view as
+    large as the objects that level detects.
     """
 
-    def __init__(self, ch, nc, canvas, reg_max=16, n_conv=2, width=0, obb=False):
+    def __init__(self, ch, nc, canvas, reg_max=16, n_conv=2, width=0, obb=False, cls32=False):
         super().__init__()
-        nl = len(STRIDES)
-        chs = per_level(ch, nl)
+        chs = per_level(ch, len(STRIDES)) if isinstance(ch, int) else tuple(ch)
+        nl = len(chs)
+        self.strides = LEVEL_STRIDES[:nl]
         ws = tuple(w or c for w, c in zip(per_level(width, nl), chs, strict=True))
         self.widths = ws   # tower output width per level; the aux branch reads it
 
@@ -50,6 +64,7 @@ class Head(Fusible):
         # `tower` is the class tower; the name is kept for checkpoint keys
         self.tower = tower()
         self.box_tower = tower()
+        self.cls32 = BasicBlock(ws[S32]) if cls32 else None
         self.cls = nn.ModuleList(nn.Conv2d(ws[lv], nc, 1) for lv in range(nl))
         self.box = nn.ModuleList(nn.Conv2d(ws[lv], 4 * reg_max, 1) for lv in range(nl))
         self.ang = nn.ModuleList(nn.Conv2d(ws[lv], 1, 1) for lv in range(nl)) if obb else None
@@ -75,7 +90,7 @@ class Head(Fusible):
         whose weight LR starts at zero.
         """
         h, w = canvas
-        for cls, box, s in zip(self.cls, self.box, STRIDES, strict=True):
+        for cls, box, s in zip(self.cls, self.box, self.strides, strict=True):
             nn.init.normal_(cls.weight, std=0.01)
             nn.init.constant_(cls.bias, math.log(objects / nc / ((h / s) * (w / s))))
             nn.init.constant_(box.bias, 1.0)
@@ -86,7 +101,11 @@ class Head(Fusible):
     def towers(self, xs):
         """Per level, the (class, box) tower outputs. Split from `readout` so
         the auxiliary branch can hang its own 1x1s on the box tower."""
-        return [(self.tower[i](x), self.box_tower[i](x)) for i, x in enumerate(xs)]
+        cb = [(self.tower[i](x), self.box_tower[i](x)) for i, x in enumerate(xs)]
+        if self.cls32 is not None:
+            c, b = cb[S32]
+            cb[S32] = (self.cls32(c), b)
+        return cb
 
     def readout(self, cb):
         out = []
@@ -107,4 +126,6 @@ class Head(Fusible):
     def fuse(self):
         self.tower = nn.ModuleList(fuse_bn_chain(t) for t in self.tower)
         self.box_tower = nn.ModuleList(fuse_bn_chain(t) for t in self.box_tower)
+        if self.cls32 is not None:
+            self.cls32 = fuse_tree(self.cls32)
         return self

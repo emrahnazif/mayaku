@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mayaku.engine.trainer import Recipe
 from mayaku.model import Detector, enable_qat
-from mayaku.model.blocks import as_canvas
+from mayaku.model.blocks import CANVAS_ALIGN, as_canvas
 from mayaku.model.tiers import TIERS, Tier
 
 if TYPE_CHECKING:
@@ -114,6 +114,12 @@ class ModelConfig(_BaseModel):
                            mask_stride=self.mask_stride, obb=self.obb,
                            keypoints=KeypointConfig(num=kp.num) if kp else None)
 
+    @property
+    def align(self) -> int:
+        """What the canvas sides must divide by: the tier's coarsest stride
+        for a detector, 32 for a classifier (one pooled map)."""
+        return CANVAS_ALIGN if self.task == "classify" else TIERS[self.tier].align
+
     def to_tier(self) -> Tier:
         """The `mayaku.model.tiers.Tier` this config builds."""
         return dataclasses.replace(TIERS[self.tier], seg=self.seg,
@@ -149,10 +155,12 @@ class InputConfig(_BaseModel):
     budget is `size_budget ** 2` pixels. `canvas_hw` is the resolved (H, W):
     set from the training data's aspect at train start
     (`mayaku.data.canvas.canvas_for_data`), or pinned by hand. Both are
-    multiples of 32, the detector's coarsest stride.
+    multiples of 32; `canvas_hw` is also a multiple of the tier's coarsest
+    stride (64 on a tier with a stride-64 level), and auto-config resolves
+    `size_budget` to such a canvas.
     """
 
-    size_budget: Annotated[int, Field(gt=0)] = 800
+    size_budget: Annotated[int, Field(gt=0)] = 768
     canvas_hw: tuple[int, int] | None = None
 
     @property
@@ -189,3 +197,10 @@ class MayakuConfig(_BaseModel):
     train: Recipe = Field(default_factory=Recipe)
     dataloader: DataLoaderConfig = Field(default_factory=DataLoaderConfig)
     auto_config: AutoConfig = Field(default_factory=AutoConfig)
+
+    @model_validator(mode="after")
+    def _canvas_fits_tier(self) -> MayakuConfig:
+        # a stride-64 tier needs canvas sides that divide by 64
+        if self.input.canvas_hw is not None:
+            as_canvas(self.input.canvas_hw, self.model.align)
+        return self

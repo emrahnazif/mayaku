@@ -27,7 +27,7 @@ from mayaku.model.quant import is_qat
 def test_defaults() -> None:
     c = MayakuConfig()
     assert c.model.tier == "n" and c.model.num_classes is None
-    assert c.input.size_budget == 800 and c.input.canvas_hw is None
+    assert c.input.size_budget == 768 and c.input.canvas_hw is None
     assert c.train == BASE and c.train.aug == DEFAULT_AUG
     assert c.auto_config.enabled
 
@@ -59,6 +59,13 @@ def test_canvas_must_be_on_the_32_grid() -> None:
     for bad in ({"size_budget": 810}, {"canvas_hw": (576, 1000)}, {"canvas_hw": (0, 64)}):
         with pytest.raises(ValidationError, match="multiple"):
             InputConfig(**bad)
+    # 4-level detection tiers align canvas_hw to 64; classifiers stay on the 32 grid
+    with pytest.raises(ValidationError, match="multiples of 64"):
+        MayakuConfig(model=ModelConfig(tier="n"), input=InputConfig(canvas_hw=(800, 800)))
+    assert MayakuConfig(model=ModelConfig(tier="n"),
+                        input=InputConfig(canvas_hw=(768, 768))).input.canvas == (768, 768)
+    assert MayakuConfig(model=ModelConfig(task="classify", tier="n"),
+                        input=InputConfig(canvas_hw=(224, 224))).input.canvas == (224, 224)
 
 
 def test_keypoint_metadata_must_match_the_count() -> None:

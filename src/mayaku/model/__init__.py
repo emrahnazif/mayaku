@@ -1,4 +1,4 @@
-"""The v3 detector: a five-op convolutional graph with host-side decode."""
+"""The v4 detector: a five-op convolutional graph with host-side decode."""
 
 from typing import TYPE_CHECKING
 

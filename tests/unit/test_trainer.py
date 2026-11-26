@@ -156,3 +156,14 @@ def test_ranked_metric_is_what_the_model_is_trained_for() -> None:
     assert ranked_metric({"AP": 0.5, "kpt_AP": 0.6}) == "kpt_AP"
     assert ranked_metric({"AP": 0.5}) == "AP"
     assert ranked_metric({"top1": 0.9, "top5": 1.0}) == "top1"
+
+
+def test_multiscale_above_and_below_deploy_canvas(tmp_path) -> None:
+    tr = fixture(tmp_path / "train", n=8, canvas=128, seed=1)
+    va = fixture(tmp_path / "val", n=4, canvas=96, seed=2)
+    r = dataclasses.replace(BASE, epochs=1, batch=4, lr_ref_batch=4, warmup_epochs=0,
+                            amp=False, recalibrate_images=0, multiscale=64, multiscale_max=128)
+    logs: list[str] = []
+    train(Detector(TINY, tr.nc, va.canvas), tr, va, r, out=str(tmp_path / "run"),
+          log_every=0, log=logs.append)
+    assert any("[(64, 64), (96, 96), (128, 128)]" in line for line in logs), logs

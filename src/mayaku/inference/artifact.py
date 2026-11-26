@@ -11,10 +11,13 @@ from pathlib import Path
 
 import torch
 
+from mayaku.data.geometry import fitted
+from mayaku.inference.decode import Decode, Detections, decode_candidates
 from mayaku.inference.export import open_session
 from mayaku.inference.export.metadata import read_sidecar, target_from_suffix
-from mayaku.inference.preprocess import Canvases
+from mayaku.inference.preprocess import Canvases, ImageInput, letterbox_batch, read_bgr
 from mayaku.inference.runner import Runner
+from mayaku.model.blocks import STRIDES
 from mayaku.utils.checkpoint import check_sidecar
 
 __all__ = ["ArtifactPredictor"]
@@ -35,6 +38,29 @@ class ArtifactPredictor(Runner):
 
     def _canvases(self, n: int) -> Canvases | None:
         return self._session.canvases(n)
+
+    def _predict_one(self, image: ImageInput, d: Decode) -> Detections | None:
+        from typing import cast
+
+        from mayaku.inference.export.tensorrt import Session as TensorRTSession
+
+        if (self.sidecar["mask"] is not None or self.sidecar["keypoints"] is not None
+                or self.sidecar.get("obb")
+                or not isinstance(cast(object, self._session), TensorRTSession)
+                or self._session.batch != 1 or not (0.0 < d.conf < 1.0)):
+            return None
+        sess = cast(TensorRTSession, self._session)
+        dec = self.sidecar["decode"]
+        strides = tuple(dec.get("strides", STRIDES))
+        bgr = read_bgr(image)
+        ch, cw = self.canvas
+        h, w = bgr.shape[:2]
+        nh, nw = fitted((h, w), min(ch / h, cw / w))
+        need_pad = sess.need_pad((nh, nw))
+        x, metas = letterbox_batch([bgr], self.canvas, sess.box_canvases(), pad=need_pad)
+        packed = sess.forward_boxes(x, len(self.class_names), dec["reg_max"],
+                                    strides, d.topk, d.multi_label)
+        return decode_candidates(packed, metas[0], d)
 
     def _forward(self, x: Canvases) -> list[torch.Tensor]:
         """BGR canvases, run in chunks of the session's batch size."""

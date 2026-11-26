@@ -34,7 +34,7 @@ from collections.abc import Collection, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from mayaku.config import MayakuConfig, merge_overrides
-from mayaku.data.canvas import canvas_for_data
+from mayaku.data.canvas import canvas_for_data, snap_max_content
 
 if TYPE_CHECKING:
     from mayaku.data.coco import CocoLabels
@@ -93,7 +93,8 @@ def _structural(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
     """The dataset's structural facts as config overrides."""
     out: dict[str, Any] = {
         "model": {"num_classes": len(coco.cat_ids)},
-        "input": {"canvas_hw": canvas_for_data(coco.shapes, cfg.input.size_budget)},
+        "input": {"canvas_hw": canvas_for_data(coco.shapes, cfg.input.size_budget,
+                                               cfg.model.align)},
     }
     if cfg.model.seg and not coco.has_masks:
         # a segmentation checkpoint fine-tuned on box-only data: no mask to learn
@@ -115,7 +116,8 @@ def _required(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
         raise ValueError(f"model.num_classes is {cfg.model.num_classes} and the training "
                          f"annotations have {nc} categories")
     if cfg.input.canvas_hw is None:
-        out["input"] = {"canvas_hw": (cfg.input.size_budget,) * 2}
+        out["input"] = {"canvas_hw": snap_max_content(cfg.input.size_budget ** 2, 1.0,
+                                                      cfg.model.align)}
     return out
 
 

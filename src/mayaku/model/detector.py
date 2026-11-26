@@ -17,8 +17,9 @@ class Detector(nn.Module):
     head's six tensors first, then the auxiliary branch's. Flat because
     exporters name outputs positionally; `split` gives the named view.
 
-    The graph runs on any canvas whose sides are multiples of 32; `canvas`
-    only sets the classifier's initial object prior (`Head.bias_init`)."""
+    The graph runs on any canvas whose sides are multiples of the tier's
+    coarsest stride (`Tier.align`, 32 or 64); `canvas` only sets the
+    classifier's initial object prior (`Head.bias_init`)."""
 
     task = "detect"
 
@@ -27,23 +28,30 @@ class Detector(nn.Module):
         self.cfg, self.nc = cfg, nc
         self.backbone = Backbone(cfg)
         self.neck = FPG(cfg.width, cfg.neck, cfg.paths)
-        self.head = Head(cfg.neck, nc, as_canvas(canvas), reg_max=cfg.reg_max,
+        self.head = Head(cfg.neck, nc, as_canvas(canvas, cfg.align), reg_max=cfg.reg_max,
                          n_conv=cfg.head_conv, width=cfg.head_width,
-                         obb=cfg.obb)
+                         obb=cfg.obb, cls32=cfg.s32_cls_block)
         self.aux = None
         if cfg.seg or cfg.kpt:
-            self.aux = AuxBranch(per_level(cfg.neck, len(STRIDES)), self.head.widths,
+            self.aux = AuxBranch(per_level(cfg.neck, len(cfg.strides)), self.head.widths,
                                  seg=cfg.seg, kpt=cfg.kpt,
                                  arm=cfg.aux_arm, width=cfg.aux_width,
                                  mask_stride=cfg.mask_stride, stem=cfg.stem)
 
+    @property
+    def align(self):
+        """What every canvas side must divide by (`Tier.align`)."""
+        return self.cfg.align
+
     def split(self, preds):
         """`forward`'s flat list -> named groups."""
-        return split_outputs(preds, seg=self.cfg.seg, kpt=self.cfg.kpt, obb=self.cfg.obb)
+        return split_outputs(preds, seg=self.cfg.seg, kpt=self.cfg.kpt, obb=self.cfg.obb,
+                             strides=self.cfg.strides)
 
     @property
     def out_names(self):
-        return output_names(seg=self.cfg.seg, kpt=self.cfg.kpt, obb=self.cfg.obb)
+        return output_names(seg=self.cfg.seg, kpt=self.cfg.kpt, obb=self.cfg.obb,
+                            strides=self.cfg.strides)
 
     def readouts(self):
         """Output projections, as opposed to hidden layers (the optimizer
@@ -85,7 +93,7 @@ class Detector(nn.Module):
 
         return {
             "outputs": self.out_names,
-            "strides": list(STRIDES),
+            "strides": list(self.cfg.strides),
             "reg_max": self.cfg.reg_max,
             "qat": is_qat(self),
             "activations": activation_scheme(self),
@@ -103,12 +111,12 @@ def build(tier="n", nc=80):
     return Detector(TIERS[tier], nc)
 
 
-def output_names(seg=False, kpt=0, obb=False):
+def output_names(seg=False, kpt=0, obb=False, *, strides=STRIDES):
     """The model's outputs, in order: cls/box interleaved per level, then, if
     present, one angle map per level, then mask + one kernel map per level,
     then heat + one keypoint map per level. The single owner of that
     layout; `split_outputs` groups by it."""
-    nl = range(len(STRIDES))
+    nl = range(len(strides))
     names = ["%s%d" % (kind, i) for i in nl for kind in ("cls", "box")]
     if obb:
         names += ["ang%d" % i for i in nl]
@@ -119,11 +127,11 @@ def output_names(seg=False, kpt=0, obb=False):
     return names
 
 
-def split_outputs(preds, seg=False, kpt=0, obb=False):
+def split_outputs(preds, seg=False, kpt=0, obb=False, *, strides=STRIDES):
     """The flat output list -> named groups: `head` is the detection tensors,
     `ang` the angle maps, `mask` / `heat` single maps, `ker` / `kpt` lists of
     one map per level."""
-    named = dict(zip(output_names(seg, kpt, obb), preds, strict=True))
+    named = dict(zip(output_names(seg, kpt, obb, strides=strides), preds, strict=True))
     g = {"head": [named[n] for n in named if n[:3] in ("cls", "box")]}
     if obb:
         g["ang"] = [named[n] for n in named if n.startswith("ang")]

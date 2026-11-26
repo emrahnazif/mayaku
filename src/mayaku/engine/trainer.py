@@ -40,7 +40,7 @@ from mayaku.data.batch import (
     seed_worker,
     to_tensor,
 )
-from mayaku.data.canvas import multi_scale_canvases
+from mayaku.data.canvas import multi_scale_canvases, render_canvas
 from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
 from mayaku.engine.evaluation import CLS_STATS, STATS, evaluate, ranked_metric, summary
 from mayaku.engine.loss import ClassifyLoss, DetectionLoss
@@ -107,6 +107,11 @@ class Recipe:
     # RF100-VL datasets budgets 512 to 800 cost 0.9 test AP (median) against
     # the fixed canvas. Worth turning on only to deploy below the canvas.
     multiscale: int = 0
+    # Size budget above the deploy canvas for multi-scale training (0 = keep
+    # the deploy canvas as the top rung). Batches render at the canvas this
+    # gives (`mayaku.data.canvas.render_canvas`), so large objects are also
+    # trained at scales above deploy while eval stays on the deploy canvas.
+    multiscale_max: int = 0
     # auxiliary heads: the Dice loss weight and the positive cap for masks.
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
     seg_gain: float = 2.0
@@ -410,7 +415,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         val_ds, out, log = None, None, lambda *_: None
     if val_ds is not None:
         assert val_ds.nc == model.nc, "head and validation labels disagree"
-        assert val_ds.canvas == canvas, "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
+        assert render_canvas(val_ds.canvas, r.multiscale_max, model.cfg.align) == canvas, \
+            "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
     start = resume["epoch"] + 1 if resume else 0
     # rank 0 keeps the single-GPU stream; the others draw their own
     # augmentation (the weights are rank 0's, broadcast when wrapped)
@@ -427,6 +433,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         crit = ClassifyLoss(model.nc)
     else:
         crit = DetectionLoss(nc=model.nc, reg_max=model.cfg.reg_max,
+                             strides=model.cfg.strides,
                              cls_loss=r.cls_loss, warmup=r.assigner_warmup,
                              atss_soft=r.atss_soft, tal_beta=r.tal_beta,
                              loc_weight_floor=r.loc_weight_floor,
@@ -467,11 +474,13 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                           persistent_workers=workers > 0)
 
     loader = make_loader()
-    # multi-scale training downscales each batch from the rendered canvas
-    # (the maximum) to a random rung of the ladder; empty = fixed, as on a
-    # canvas no larger than a `multiscale` budget gives (the ladder is the
-    # canvas alone)
-    ms_sizes = multi_scale_canvases(canvas, r.multiscale) if r.multiscale else []
+    # multi-scale training downscales each batch from the rendered top canvas
+    # to a random rung of the ladder anchored on `deploy_canvas`
+    deploy_canvas = (val_ds.canvas if val_ds is not None
+                     else tuple(sidecar["canvas_hw"]) if sidecar and "canvas_hw" in sidecar
+                     else canvas)
+    ms_sizes = (multi_scale_canvases(deploy_canvas, r.multiscale, model.cfg.align, r.multiscale_max)
+                if (r.multiscale or r.multiscale_max) else [])
     if len(ms_sizes) < 2:
         ms_sizes = []
     if ms_sizes and out:
@@ -481,7 +490,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     if out and not resume:
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "recipe.json"), "w") as f:
-            json.dump({**dataclasses.asdict(r), "canvas": list(canvas)}, f, indent=2)
+            json.dump({**dataclasses.asdict(r), "canvas": list(deploy_canvas)}, f, indent=2)
         with open(os.path.join(out, "tier.json"), "w") as f:
             json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
         open(log_path, "w").close()

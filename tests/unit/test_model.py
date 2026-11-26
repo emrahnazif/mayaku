@@ -19,6 +19,7 @@ from mayaku.model import (
     load_pretrained,
     load_weights,
 )
+from mayaku.model.aux import MASK_CH
 from mayaku.model.blocks import SPPFAdd, as_canvas, conv_bn_pairs, rescale_to_init
 from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx, randomize_bn
 from mayaku.model.quant import qdq_export
@@ -30,12 +31,15 @@ SEG_KPT = dataclasses.replace(TINY, seg=True, kpt=3)
 # feature reading the stride-4 stage
 LAYOUT = dataclasses.replace(TINY, stem=16, stem_mid=8, s4_depth=1, expansion=2,
                              global_ctx=True, seg=True, mask_stride=4)
+P6_LAYOUT = dataclasses.replace(TINY, width=(16, 32, 64, 64), depth=(1, 1, 1, 1),
+                                neck=(16, 16, 32, 32), head_width=(16, 16, 24, 24),
+                                s32_blocks=2, s32_cls_block=True, seg=True, kpt=3)
 
 
 @pytest.mark.parametrize(
     "cfg",
-    [TINY, SEG_KPT, dataclasses.replace(SEG_KPT, aux_arm="tower"), LAYOUT],
-    ids=["tiny", "tiny-seg-kpt", "tiny-seg-kpt-tower", "tiny-layout"],
+    [TINY, SEG_KPT, dataclasses.replace(SEG_KPT, aux_arm="tower"), LAYOUT, P6_LAYOUT],
+    ids=["tiny", "tiny-seg-kpt", "tiny-seg-kpt-tower", "tiny-layout", "tiny-p6"],
 )
 def test_fuse_parity_and_contract(cfg) -> None:
     err, scale, inv = check_parity(Detector(cfg, 4), 128)
@@ -55,7 +59,7 @@ def test_tier_fuse_parity_and_contract(tier: str) -> None:
 
 def test_deploy_parameter_counts() -> None:
     """The locked range: deploy (fused) parameters per tier."""
-    want = {"n": 5.18, "s": 13.88, "m": 32.40, "l": 57.91}
+    want = {"n": 11.48, "s": 28.75, "m": 65.87, "l": 117.17}
     for tier, millions in want.items():
         m = Detector(TIERS[tier], 80).fuse()
         params = sum(p.numel() for p in m.parameters())
@@ -69,10 +73,37 @@ def test_output_layout() -> None:
     assert len(out) == len(m.out_names) == 6 + 4 + 4
     g = m.split(out)
     assert len(g["head"]) == 6 and len(g["ker"]) == 3 and len(g["kpt"]) == 3
-    assert g["mask"].shape == (1, 8, 16, 12)
+    assert g["mask"].shape == (1, MASK_CH, 16, 12)
     assert g["heat"].shape == (1, 3 + 2, 16, 12)
     for i, s in enumerate(STRIDES):
         assert g["head"][2 * i].shape == (1, 4, 128 // s, 96 // s)
+
+
+def test_p6_output_layout_align_and_qat(tmp_path) -> None:
+    m = enable_qat(Detector(P6_LAYOUT, 4, 128))
+    m.train()
+    with torch.no_grad():
+        m(torch.randn(2, 3, 128, 128))
+    m.fuse()
+    assert m.align == 64 and P6_LAYOUT.strides == (8, 16, 32, 64)
+    with pytest.raises(AssertionError, match="multiples of 64"):
+        as_canvas((128, 96), m.align)
+    with torch.no_grad():
+        out = m(torch.zeros(1, 3, 128, 192))
+    assert len(out) == len(m.out_names) == 8 + 5 + 5
+    g = m.split(out)
+    assert len(g["head"]) == 8 and len(g["ker"]) == 4 and len(g["kpt"]) == 4
+    assert g["mask"].shape == (1, MASK_CH, 16, 24)
+    for i, s in enumerate(P6_LAYOUT.strides):
+        assert g["head"][2 * i].shape == (1, 4, 128 // s, 192 // s)
+    inv = export_onnx(m, str(tmp_path / "p6_int8.onnx"), (128, 192), int8=True, regrid=True)
+    assert set(inv) <= DEPLOY_OPS | QDQ_OPS and inv["QuantizeLinear"] > 0
+    # neck downsamples are 3x3 stride-2 (none left at 1x1 stride-2)
+    graph = onnx.load(str(tmp_path / "p6_int8.onnx")).graph
+    stride2 = [list( {x.name: x for x in n.attribute}["kernel_shape"].ints )
+               for n in graph.node if n.op_type == "Conv"
+               and list({x.name: x for x in n.attribute}["strides"].ints) == [2, 2]]
+    assert stride2 and all(k == [3, 3] for k in stride2)
 
 
 @pytest.mark.parametrize("canvas", [128, (96, 160), (160, 96)])

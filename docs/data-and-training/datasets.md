@@ -153,7 +153,7 @@ report = mayaku.health_check("data/train/_annotations.coco.json", "data/train")
 ```
 
 - `object_size` sorts boxes into the COCO buckets (small: under 32×32 pixels; large: 96×96 and over), measured **after** resizing to `canvas`, which is the scale the model sees.
-- `canvas` is the input size [auto-config](/docs/data-and-training/training.md#auto-config) picks for this data at the default size budget of 800. To check another budget, pass a config:
+- `canvas` is the input size [auto-config](/docs/data-and-training/training.md#auto-config) picks for this data at the default size budget of 768. To check another budget, pass a config:
 
   ```python
   import mayaku

@@ -35,6 +35,7 @@ import torch
 from mayaku.backends.device import DeviceKind
 from mayaku.config import MayakuConfig, dump_yaml, merge_overrides, read_yaml
 from mayaku.data import CocoDetection
+from mayaku.data.canvas import render_canvas
 from mayaku.data.coco import CocoLabels, load_coco
 from mayaku.data.folder import FolderDataset, FolderLabels, load_folder
 from mayaku.engine.distributed import (
@@ -421,7 +422,11 @@ def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
         kp = cfg.model.keypoints
         labels: dict[str, Any] = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0,
                                       obb=cfg.model.obb)
-        train_ds = CocoDetection(str(job.train_images), str(job.train_annotations), canvas,
+        render = render_canvas(canvas, cfg.train.multiscale_max, cfg.model.align)
+        if render != canvas:
+            log(f"[mayaku.train] render canvas {render[0]}x{render[1]} "
+                f"(multiscale_max {cfg.train.multiscale_max})")
+        train_ds = CocoDetection(str(job.train_images), str(job.train_annotations), render,
                                  aug=cfg.train.aug, seed=cfg.train.seed, coco=job.coco, **labels)
         val_ds = CocoDetection(str(job.val[1]), str(job.val[0]), canvas, **labels) \
             if job.val and main else None

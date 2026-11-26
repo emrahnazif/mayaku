@@ -37,6 +37,7 @@ from mayaku.model import box as boxlib
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
 from mayaku.model import obb as obblib
+from mayaku.model.blocks import STRIDES
 from mayaku.model.box import decode_head
 from mayaku.model.detector import split_outputs
 
@@ -230,10 +231,11 @@ class DetectionLoss(nn.Module):
                  atss_soft=False, tal_beta=6.0, loc_weight_floor=0.0,
                  seg=False, seg_gain=2.0, seg_cap=250, kpt=0,
                  kpt_gains=(12.0, 1.0, 1.0, 1.0), kpt_gain=1.0, obb=False,
-                 obb_angle_gain=1.0):
+                 obb_angle_gain=1.0, strides=STRIDES):
         super().__init__()
         assert cls_loss in ("bce", "vfl"), cls_loss
         self.nc, self.reg_max = nc, reg_max
+        self.strides = tuple(strides)
         self.cls_loss = cls_loss
         self.gains = (box_gain, cls_gain, dfl_gain)
         self.loc_weight_floor = loc_weight_floor
@@ -253,7 +255,7 @@ class DetectionLoss(nn.Module):
         masks: (B, H, W) uint8 full-resolution instance index map (row + 1)
         when the model has a mask branch. Returns (total, parts)."""
         pd_cls, pd_dist, pd_boxes, points, stride, shapes = decode_head(
-            preds, self.nc, self.reg_max)
+            preds, self.nc, self.reg_max, self.strides)
         b = pd_cls.shape[0]
         device = pd_cls.device
 
@@ -263,7 +265,7 @@ class DetectionLoss(nn.Module):
         gt_labels, gt_boxes, mask_gt, extras = (
             t.to(device, non_blocking=True) for t in pad_targets(targets, b))
         grp = split_outputs(preds, seg=self.seg is not None, kpt=self.kpt is not None,
-                            obb=self.obb)
+                            obb=self.obb, strides=self.strides)
         if self.obb:
             # oriented: the assigner and the box terms work on xywhr
             pd_boxes = obblib.decode_head(grp["ang"], pd_dist, points, stride, self.reg_max)

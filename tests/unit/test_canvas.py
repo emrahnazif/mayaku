@@ -8,6 +8,7 @@ from mayaku.data.canvas import (
     canvas_for_data,
     data_aspect,
     multi_scale_canvases,
+    render_canvas,
     snap_max_content,
 )
 
@@ -78,3 +79,14 @@ def test_rejects_bad_inputs() -> None:
         snap_max_content(0, 1.0)
     with pytest.raises(ValueError, match="aspect"):
         snap_max_content(BUDGET, 0.0)
+
+
+def test_align_64_and_multiscale_above_deploy() -> None:
+    assert snap_max_content(BUDGET, 1.0, 64) == (768, 768)
+    assert snap_max_content(BUDGET, 16 / 9, 64) == (576, 1024)
+    assert render_canvas((768, 768), 960, 64) == (960, 960)
+    assert render_canvas((768, 768), 640, 64) == (768, 768)
+    assert multi_scale_canvases((768, 768), 640, 64, max_budget=960) == [
+        (640, 640), (704, 704), (768, 768), (832, 832), (896, 896), (960, 960)]
+    assert multi_scale_canvases((768, 768), 0, 64, max_budget=960) == [
+        (768, 768), (832, 832), (896, 896), (960, 960)]

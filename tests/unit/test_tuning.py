@@ -94,7 +94,7 @@ def test_a_pinned_clean_stage_survives_a_derived_run_length(coco) -> None:
 def test_disabled_fills_only_what_a_model_needs(coco) -> None:
     cfg = MayakuConfig.model_validate({"auto_config": {"enabled": False}})
     new, changes = apply_auto_config(cfg, coco)
-    assert new.model.num_classes == 4 and new.input.canvas_hw == (800, 800)
+    assert new.model.num_classes == 4 and new.input.canvas_hw == (768, 768)
     assert new.train == cfg.train and len(changes) == 2
     pinned = MayakuConfig.model_validate({"auto_config": {"enabled": False},
                                           "model": {"num_classes": 4},

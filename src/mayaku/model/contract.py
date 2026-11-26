@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
 
-from mayaku.model.blocks import as_canvas
+from mayaku.model.blocks import CANVAS_ALIGN, as_canvas
 from mayaku.model.quant import deploy_mode, is_qat
 
 DEPLOY_OPS = {"Conv", "Relu", "Add", "Resize", "MaxPool"}
@@ -64,7 +64,7 @@ def export_onnx(model, path, canvas, batch=1, int8=False, *, regrid=False):
     QuantizeLinear / DequantizeLinear around every conv; `regrid` as in
     `mayaku.model.quant.qdq_export`.
     """
-    h, w = as_canvas(canvas)
+    h, w = as_canvas(canvas, getattr(model, "align", CANVAS_ALIGN))
     if int8 and not is_qat(model):
         raise ValueError("an int8 graph needs a quantization-aware model (model.qat)")
     with deploy_mode(model, int8, regrid):
@@ -79,7 +79,7 @@ def count(model, canvas=640):
     (fuse it first for the deploy graph)."""
     counter = FlopCounterMode(display=False)
     with counter, torch.no_grad():
-        model(torch.zeros(1, 3, *as_canvas(canvas)))
+        model(torch.zeros(1, 3, *as_canvas(canvas, getattr(model, "align", CANVAS_ALIGN))))
     return sum(p.numel() for p in model.parameters()), counter.get_total_flops()
 
 
@@ -98,7 +98,7 @@ def check_parity(model, canvas):
     """Assert the deploy graph computes the train graph on an (H, W) canvas,
     then that it is in contract. Fuses `model` in place; returns (max error,
     logit scale, compute-op inventory)."""
-    canvas = as_canvas(canvas)
+    canvas = as_canvas(canvas, getattr(model, "align", CANVAS_ALIGN))
     randomize_bn(model)
     x = torch.randn(1, 3, *canvas)
     model.eval()

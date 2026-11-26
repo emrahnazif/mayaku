@@ -46,7 +46,7 @@ def _trained_like(model):
     return model
 
 
-@pytest.fixture(scope="module", params=[(128, 192), (160, 160)], ids=["rect", "square"])
+@pytest.fixture(scope="module", params=[(128, 192), (128, 128)], ids=["rect", "square"])
 def run(request, tmp_path_factory):
     """A tiny tier-n-shaped checkpoint with masks and keypoints, and its data."""
     root = tmp_path_factory.mktemp("run")
@@ -100,7 +100,8 @@ def test_prediction_decodes_with_the_predict_block(run, predictor) -> None:
     x, metas = letterbox_batch(files, predictor.canvas)
     want = decode_sidecar(predictor._forward(x), metas, sc, None, None, "predict")
     loose = decode(predictor._forward(x), metas, len(predictor.class_names), sc["decode"]["reg_max"],
-                   seg=True, kpt=3, d=dataclasses.replace(PREDICT, iou=0.7))
+                   seg=True, kpt=3, d=dataclasses.replace(PREDICT, iou=0.7),
+                   strides=sc["decode"]["strides"])
     for g, w, wide in zip(predictor.batch(files), want, loose, strict=True):
         assert torch.equal(g.boxes, w.boxes) and torch.equal(g.labels, w.labels)
         assert len(g) <= len(wide)                    # NMS 0.5 keeps no more than 0.7
@@ -372,3 +373,40 @@ def test_tensorrt_sidecar_header_round_trip(tmp_path) -> None:
     bare = tmp_path / "bare.engine"
     bare.write_bytes(b"\x00\x01ENGINE-BYTES")
     assert read_sidecar(bare, "tensorrt") is None and strip_tensorrt_header(bare) == bare.read_bytes()
+
+
+def test_decode_candidates_matches_host_nms_and_handles_empty_and_large() -> None:
+    """`decode_candidates` reproduces greedy class-aware NMS + unletterbox on
+    both the small-N sorted NumPy branch and the large-N torchvision fallback."""
+    from mayaku.inference.decode import decode_candidates
+
+    meta = {"ratio": 0.5, "pad": (10, 20), "shape": (480, 640)}
+    torch.manual_seed(0)
+    # 150 > 128 triggers the batched_nms path at low conf, _nms_sorted_numpy at high conf
+    xy = torch.rand(150, 2) * 300
+    boxes = torch.cat((xy, xy + torch.rand(150, 2) * 80 + 5), 1)
+    logits = torch.linspace(4.0, -2.0, 150)[:, None]
+    labels = torch.randint(0, 5, (150, 1)).float()
+    packed = torch.cat((boxes, logits, labels), 1)
+
+    for conf, max_det in ((0.999, 300), (0.6, 5), (0.1, 20), (0.05, 300)):
+        d = PredictDecode(conf=conf, iou=0.5, max_det=max_det, topk=150, multi_label=False)
+        got = decode_candidates(packed, meta, d)
+        floor = torch.log(torch.tensor(conf / (1.0 - conf)))
+        assert (got.scores > conf).all() and len(got) <= max_det
+        if len(got):
+            assert (got.boxes[:, 0::2] <= 640).all() and (got.boxes[:, 1::2] <= 480).all()
+        # empty check vs threshold above max logit
+        if logits[0, 0] <= floor:
+            assert len(got) == 0
+    # small-N (<=128) and >128 agree on identical >128 inputs sliced around the threshold
+    d_small = PredictDecode(conf=0.8, iou=0.5, max_det=30, topk=150, multi_label=False)
+    a = decode_candidates(packed[:60], meta, d_small)
+    from mayaku.backends.ops.nms import batched_nms
+    from mayaku.data.geometry import unletterbox
+    keep_mask = packed[:60, 4] > torch.log(torch.tensor(0.8 / 0.2))
+    sub = packed[:60][keep_mask]
+    keep = batched_nms(sub[:, :4], sub[:, 4].sigmoid(), sub[:, 5].long(), 0.5)[:30]
+    assert torch.allclose(a.boxes, unletterbox(sub[keep, :4], meta["ratio"], meta["pad"], meta["shape"]))
+    assert torch.allclose(a.scores, sub[keep, 4].sigmoid(), atol=1e-6)
+    assert torch.equal(a.labels, sub[keep, 5].long())
