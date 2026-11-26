@@ -70,20 +70,22 @@ Measured on **2026-11-26** against branch `v4` (commit `56dd180`, 4-level P6 arc
 
 | Runtime / Config | Build / Warmup | Load | Engine (ms) | E2E (ms) |
 |---|---:|---:|---:|---:|
-| Current `Predictor` (PyTorch FP32 NCHW eager) | 0 s (1st: 178 ms) | 0.22 s | 10.64 | 9.92 |
-| **PyTorch FP16 NHWC + `CUDAGraph` (0 extra deps)** | **0 s (warm: 239 ms)** | 0.19 s | **3.66** | **4.43** |
+| Previous `Predictor` (`MAYAKU_TORCH_FP16=0`, FP32 eager) | 0 s (1st: 192 ms) | 0.22 s | 10.64 | 9.86 |
+| **Shipped `Predictor` (FP16 NHWC + `CUDAGraph`, 0 deps)** | **0 s (1st: 425 ms)** | 0.19 s | **3.66** | **4.50** |
 | TRT FP16 `opt=0` (cold) | 8.16 s (+0.67 s ONNX) | 20 ms | 2.29 | 3.11 |
-| TRT FP16 `opt=2` (cold) | 27.41 s (+0.65 s ONNX) | 29 ms | 1.63 | 2.40 |
-| TRT FP16 `opt=3` (cold — *current `tensorrt.py`*) | 71.78 s (+0.65 s ONNX) | 38 ms | 1.57 | 2.40 |
-| **TRT FP16 `opt=3` (warm timing cache)** | **3.97 s** (+0.61 s ONNX) | 38 ms | 1.67 | 2.39 |
-| **TRT INT8 `opt=0` (cold)** | **6.47 s** (+1.35 s ONNX) | 17 ms | **1.50** | **2.15** |
-| **TRT INT8 `opt=2` (cold)** | **13.59 s** (+1.30 s ONNX) | 19 ms | **1.19** | **1.87** |
-| TRT INT8 `opt=3` (cold — *current `tensorrt.py`*) | 50.69 s (+1.38 s ONNX) | 22 ms | 1.12 | 1.80 |
-| **TRT INT8 `opt=3` (warm timing cache)** | **2.42 s** (+1.31 s ONNX) | 22 ms | **1.12** | **1.77** |
+| **TRT FP16 `opt=2` (cold — *shipped default*)** | **29.2 s** (31.5 s w/ parity) | 29 ms | **1.63** | **2.40** |
+| **TRT FP16 `opt=2` (warm timing cache)** | **3.7 s** (5.4 s w/ parity) | 29 ms | **1.63** | **2.40** |
+| TRT FP16 `opt=3` (cold — *previous default*) | 71.78 s (+0.65 s ONNX) | 38 ms | 1.57 | 2.40 |
+| TRT FP16 `opt=3` (warm timing cache) | 3.97 s (+0.61 s ONNX) | 38 ms | 1.67 | 2.39 |
+| TRT INT8 `opt=0` (cold) | 6.47 s (+1.35 s ONNX) | 17 ms | 1.50 | 2.15 |
+| **TRT INT8 `opt=2` (cold — *shipped default*)** | **14.1 s** (16.5 s w/ parity) | 19 ms | **1.19** | **1.87** |
+| **TRT INT8 `opt=2` (warm timing cache)** | **1.7 s** (4.2 s w/ parity) | 19 ms | **1.19** | **1.87** |
+| TRT INT8 `opt=3` (cold — *previous default*) | 50.69 s (+1.38 s ONNX) | 22 ms | 1.12 | 1.80 |
+| TRT INT8 `opt=3` (warm timing cache) | 2.42 s (+1.31 s ONNX) | 22 ms | 1.12 | 1.77 |
 
-**Key findings on build & first-run UX:**
-1. **Pure PyTorch fast default:** Upgrading `Predictor` on CUDA to FP16 + `channels_last` + pinned upload buffer + `CUDAGraph` gives an instant **2.9× engine / 2.2× E2E speedup** (`10.64 → 3.66 ms` engine, `9.92 → 4.43 ms` E2E) with **239 ms warmup** and zero new dependencies.
-2. **5 ops slashes TensorRT build time vs. competitors:** YOLO26 native TRT builds took **153–295 s** and RF-DETR took **57–68 s**. Mayaku v4 INT8 `opt=2` builds in **12–14 s** across every tier (`n` through `l`) with virtually identical latency to `opt=3` (`1.19` vs `1.12 ms`), and **2.4 s** with a persistent local timing cache.
+**Key findings on build & first-run UX (now implemented on `v4-fast-deploy`):**
+1. **Pure PyTorch fast default:** `Predictor` on Tensor-Core CUDA GPUs now runs FP16 `channels_last` + pinned upload + fused `CUDAGraph` for single-image `decode="predict"`, giving **2.2× E2E speedup** (`9.86 → 4.50 ms` E2E, `10.64 → 3.66 ms` engine) with zero new dependencies while keeping `decode="eval"`, `evaluate()`, and `export()` in exact FP32.
+2. **5 ops slashes TensorRT build time vs. competitors:** YOLO26 native TRT builds took **153–295 s** and RF-DETR took **57–68 s**. With `opt=2` + persistent timing cache in `tensorrt.py`, Mayaku v4 INT8 builds in **14.1 s** cold and **1.7 s** on cache hit (`29.2 s` cold / `3.7 s` warm for FP16), with `≤0.07 ms` E2E delta vs. `opt=3`.
 3. **Cached `.engine` load:** Deserializing a cached engine takes **17–38 ms**.
 
 ---
@@ -109,8 +111,15 @@ Measured on **2026-11-26** against branch `v4` (commit `56dd180`, 4-level P6 arc
 | **`mayaku-v4-l`** | **768** | 117.17M | 123.7G | 73.68 ms | 74.80 ms | 17.59 s | 12.84 s | **35.06 ms** | **36.41 ms** |
 | | **960** | 117.17M | 193.3G | 94.81 ms | 98.89 ms | 18.04 s | 13.34 s | 57.53 ms | 59.89 ms |
 
-> **Action item on `v4` branch (Core ML INT8):** `v4` branched before `main`'s commit `81f2549` (`QUANT_SKIPS = False` in `coreml.py`). As a result, `v4-n` Core ML INT8 ran on ANE at `768` (**8.21 ms net / 10.05 ms e2e**) but fell back to CPU at `832 / 896 / 960` (**146–173 ms**). Cherry-picking `81f2549` onto `v4` will restore ANE execution for Core ML INT8 at `≥832px`.
->
+### Apple M1 Max — Core ML INT8 (ANE, fixed on `v4-fast-deploy` with `QUANT_SKIPS = False`)
+
+| Model | Res | Export + Parity | ANE Load | **ANE INT8 Net** | **ANE INT8 E2E** | Before fix (CPU fallback) |
+|---|---:|---:|---:|---:|---:|---:|
+| **`mayaku-v4-n`** | **768** | 15.26 s | 4.41 s | **7.23 ms** | **8.98 ms** | 8.21 ms / 10.05 ms |
+| | **832** | 14.43 s | 4.38 s | **8.42 ms** | **10.34 ms** | 146.52 ms / 154.96 ms (109.9 s load) |
+| | **896** | 14.49 s | 4.37 s | **9.70 ms** | **11.69 ms** | 166.39 ms / 156.63 ms (111.9 s load) |
+| | **960** | 15.43 s | 4.69 s | **11.13 ms** | **13.15 ms** | 172.97 ms / 177.28 ms (118.6 s load) |
+
 > **ANE even-tile note:** On `v4-s`, `896` (`14.45 ms`) is faster than `832` (`15.24 ms`) because `896 / 64 = 14` (even) tiles better on ANE than `832 / 64 = 13` (odd).
 
 ### CPU Scaling (`mayaku-v4-n`)
