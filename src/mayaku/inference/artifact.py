@@ -39,12 +39,14 @@ class ArtifactPredictor(Runner):
     def _canvases(self, n: int) -> Canvases | None:
         return self._session.canvases(n)
 
-    def _predict_one(self, image: ImageInput, d: Decode) -> Detections | None:
+    def _predict_one(self, image: ImageInput, d: Decode | None,
+                     decode_mode: str) -> Detections | None:
         from typing import cast
 
         from mayaku.inference.export.tensorrt import Session as TensorRTSession
 
-        if (self.sidecar["mask"] is not None or self.sidecar["keypoints"] is not None
+        if (d is None or self.sidecar["mask"] is not None
+                or self.sidecar["keypoints"] is not None
                 or self.sidecar.get("obb")
                 or not isinstance(cast(object, self._session), TensorRTSession)
                 or self._session.batch != 1 or not (0.0 < d.conf < 1.0)):

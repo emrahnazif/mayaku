@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Core ML int8 exports now leave residual skip operands in float (`QUANT_SKIPS = False`, matching
+  `main` commit `81f2549`), keeping every convolution W8A8 quantized while preventing the Apple
+  Neural Engine compiler from falling back to the CPU at canvases of 800 px and above. On an Apple
+  M1 Max (`mayaku-v4-n`, 1920×1080 frame), Core ML int8 drops from CPU fallback to full Neural
+  Engine execution: `768` `8.21 -> 7.23 ms` net (`8.98 ms` e2e), `832` `146.5 -> 8.42 ms`
+  (`10.34 ms` e2e), `896` `166.4 -> 9.70 ms` (`11.69 ms` e2e), `960` `173.0 -> 11.13 ms`
+  (`13.15 ms` e2e), with load time dropping from ~110 s to 4.4 s.
+- Faster TensorRT engine builds (`mayaku export tensorrt`): defaults to TensorRT builder
+  optimization level 2 (`MAYAKU_TRT_OPT_LEVEL` to override), persists a per-GPU/TensorRT timing
+  cache under `~/.cache/mayaku/` (or `MAYAKU_CACHE_DIR`; `MAYAKU_TRT_TIMING_CACHE=0` to disable),
+  and prints build status and elapsed time to stderr. On an RTX 3060 (`mayaku-v4-n`, 768×768),
+  cold builds drop from 71.8 s to 29.2 s (fp16) and 50.7 s to 14.1 s (int8) with <=0.07 ms E2E
+  delta, and repeat/fine-tune builds with a warm timing cache finish in 3.7 s (fp16) and 1.7 s
+  (int8).
+- Faster default PyTorch CUDA inference (`Predictor`): single-image `decode="predict"` calls on
+  Tensor-Core CUDA GPUs (Volta/Turing and newer; `MAYAKU_TORCH_FP16=0` to disable) lazily run an
+  FP16 `channels_last` CUDA-graph fast path (with fused top-K/DFL box decode for box detectors),
+  leaving `Predictor.model`, `decode="eval"`, `evaluate()` and `export()` in exact FP32. On an RTX
+  3060 (`mayaku-v4-n`, 768×768, 100 COCO `val2017` images), single-image `Predictor` E2E latency
+  drops from 9.86 ms to 4.50 ms (2.2× faster, 425 ms first-call capture).
+
 - v4 detector architecture for medium and large objects (requires fresh O365 base pretraining; not
   weight-compatible with v3 checkpoints):
   - All detection tiers (`n`, `s`, `m`, `l`) add a fourth stride-64 level (`strides=[8, 16, 32, 64]`,

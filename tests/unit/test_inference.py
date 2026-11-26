@@ -229,6 +229,21 @@ def _runtime(target: str) -> None:
                          "openvino": "openvino", "tensorrt": "tensorrt"}[target])
 
 
+def _assert_float_skips(path) -> None:
+    """Every conv input of a Core ML int8 package is quantized, but no add reads
+    a dequantized operand: a quantized skip makes the Neural Engine compiler
+    fail on large canvases (`mayaku.inference.export.coreml`)."""
+    import coremltools as ct
+
+    main = ct.models.MLModel(str(path), skip_model_load=True).get_spec().mlProgram.functions["main"]
+    ops = next(iter(main.block_specializations.values())).operations
+    dequantized = {out.name for op in ops if op.type == "dequantize" for out in op.outputs}
+    adds = [op for op in ops if op.type == "add"]
+    assert adds and dequantized
+    assert not any(a.name in dequantized
+                   for op in adds for arg in op.inputs.values() for a in arg.arguments)
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(("target", "precision"), [
     ("onnx", "int8"), ("coreml", "fp16"), ("coreml", "int8"), ("openvino", "fp32"),
@@ -246,10 +261,13 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
     # simulation, not to the float model (on this barely trained model many
     # detections sit at the threshold, where int8 rounding moves the count)
     # the recorded decode (conf 0.3, multi-label), as before prediction defaults existed
-    with qdq_export(predictor.model) if precision == "int8" else contextlib.nullcontext():
+    with (qdq_export(predictor.model, skips=TARGETS[target].quant_skips) if precision == "int8"
+          else contextlib.nullcontext()):
         want = predictor.batch(run[2], decode="eval")
     got = a.batch(run[2], decode="eval")
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
+    if (target, precision) == ("coreml", "int8"):
+        _assert_float_skips(path)
     if target == "tensorrt":    # the first call records a CUDA graph, later calls replay it
         s = open_session(path, a.sidecar, "cuda")
         px = torch.randint(0, 256, (2, 1, *a.canvas, 3), dtype=torch.uint8,
@@ -410,3 +428,115 @@ def test_decode_candidates_matches_host_nms_and_handles_empty_and_large() -> Non
     assert torch.allclose(a.boxes, unletterbox(sub[keep, :4], meta["ratio"], meta["pad"], meta["shape"]))
     assert torch.allclose(a.scores, sub[keep, 4].sigmoid(), atol=1e-6)
     assert torch.equal(a.labels, sub[keep, 5].long())
+
+
+def test_tensorrt_opt_level_and_timing_cache_helpers(tmp_path, monkeypatch) -> None:
+    """TensorRT defaults to opt=2 with a per-GPU persistent timing cache under
+    MAYAKU_CACHE_DIR (or ~/.cache/mayaku), recovers cleanly from a corrupt
+    cache file, and honors env overrides."""
+    from mayaku.inference.export import tensorrt as trt_mod
+
+    monkeypatch.delenv("MAYAKU_TRT_OPT_LEVEL", raising=False)
+    monkeypatch.delenv("MAYAKU_TRT_TIMING_CACHE", raising=False)
+    assert trt_mod._opt_level() == 2
+    assert trt_mod._timing_cache_enabled()
+
+    monkeypatch.setenv("MAYAKU_TRT_OPT_LEVEL", "3")
+    assert trt_mod._opt_level() == 3
+    monkeypatch.setenv("MAYAKU_TRT_OPT_LEVEL", "9")
+    with pytest.raises(ValueError, match="MAYAKU_TRT_OPT_LEVEL"):
+        trt_mod._opt_level()
+    monkeypatch.setenv("MAYAKU_TRT_TIMING_CACHE", "0")
+    assert not trt_mod._timing_cache_enabled()
+
+    monkeypatch.setenv("MAYAKU_CACHE_DIR", str(tmp_path))
+    p = trt_mod._timing_cache_path("NVIDIA GeForce RTX 3060", "10.13.0.35", 2)
+    assert p == tmp_path / "trt_timing_nvidia_geforce_rtx_3060_trt10.13_opt2.bin"
+
+    class FakeCache:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        def serialize(self) -> bytes:
+            return self.data
+
+    class FakeConfig:
+        def __init__(self) -> None:
+            self.cache: FakeCache | None = None
+
+        def create_timing_cache(self, raw: bytes) -> FakeCache:
+            if raw == b"corrupt":
+                raise RuntimeError("bad cache")
+            return FakeCache(raw or b"fresh")
+
+        def set_timing_cache(self, cache: FakeCache, ignore_mismatch: bool = False) -> None:
+            self.cache = cache
+
+        def get_timing_cache(self) -> FakeCache | None:
+            return self.cache
+
+    cfg = FakeConfig()
+    assert not trt_mod._load_timing_cache(cfg, p)
+    trt_mod._save_timing_cache(cfg, p)
+    assert p.read_bytes() == b"fresh"
+    assert trt_mod._load_timing_cache(cfg, p)
+
+    p.write_bytes(b"corrupt")
+    assert not trt_mod._load_timing_cache(cfg, p)
+    assert cfg.cache is not None and cfg.cache.data == b"fresh"
+
+
+@pytest.mark.cuda
+def test_cuda_predictor_fast_path_preserves_eval_and_export(run, tmp_path, monkeypatch) -> None:
+    """Single-image `predict` on CUDA uses the FP16 NHWC CUDA-graph fast path
+    while keeping `decode="eval"` and `export()` on the untouched FP32 model."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    _, ckpt, files = run
+    pred = Predictor.from_checkpoint(ckpt, "cuda")
+    # single-image predict activates _cuda_fast on Turing+ GPUs (seg+kpt fixture exercises forward_maps)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        got_fast = pred(files[0])
+        got_fast_2 = pred(files[1])
+    assert pred.model.parameters().__next__().dtype == torch.float32
+    if torch.cuda.get_device_capability(pred.device) >= (7, 0):
+        assert pred._cuda_fast is not None
+
+    monkeypatch.setenv("MAYAKU_TORCH_FP16", "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        got_fp32 = pred(files[0])
+        got_fp32_2 = pred(files[1])
+    assert abs(len(got_fast) - len(got_fp32)) <= max(2, len(got_fp32) // 10)
+    assert abs(len(got_fast_2) - len(got_fp32_2)) <= max(2, len(got_fp32_2) // 10)
+    if len(got_fast) and len(got_fp32):
+        assert box_iou(got_fast.boxes[:1], got_fp32.boxes[:1]).item() > 0.9
+
+    # plain box detector exercises the fused forward_boxes CUDA graph
+    ds, _, _ = run
+    cfg_det = MayakuConfig(model=ModelConfig(tier="n", num_classes=ds.nc),
+                           input=InputConfig(canvas_hw=(128, 128)))
+    m_det = _trained_like(cfg_det.model.build((128, 128)))
+    m_det.train()
+    with torch.no_grad():
+        m_det(torch.rand(2, 3, 128, 128))
+    m_det.eval()
+    p_det = Predictor(m_det, build_sidecar(cfg_det, ds.coco.class_names, m_det), "cuda")
+    monkeypatch.delenv("MAYAKU_TORCH_FP16", raising=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fast_box = p_det(files[0])
+    monkeypatch.setenv("MAYAKU_TORCH_FP16", "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fp32_box = p_det(files[0])
+    assert abs(len(fast_box) - len(fp32_box)) <= max(2, len(fp32_box) // 10)
+    # decode="eval" stays exact FP32 even with MAYAKU_TORCH_FP16 enabled
+    monkeypatch.delenv("MAYAKU_TORCH_FP16", raising=False)
+    ev1 = p_det(files[0], decode="eval")
+    monkeypatch.setenv("MAYAKU_TORCH_FP16", "0")
+    ev2 = p_det(files[0], decode="eval")
+    assert torch.equal(ev1.boxes, ev2.boxes) and torch.equal(ev1.scores, ev2.scores)
+    # export still works from the untouched FP32 model
+    assert p_det.export("onnx", tmp_path / "m.onnx").is_file()

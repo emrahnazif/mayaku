@@ -26,11 +26,19 @@ from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
 from mayaku.model import obb as obblib
 from mayaku.model.blocks import STRIDES
-from mayaku.model.box import anchor_grid, decode_boxes, flatten_head, flatten_levels
+from mayaku.model.box import (
+    anchor_grid,
+    decode_boxes,
+    dfl_expectation,
+    flatten_head,
+    flatten_levels,
+    ltrb_to_xyxy,
+)
 from mayaku.model.detector import split_outputs
 
 __all__ = ["DEPLOY", "PREDICT", "Classification", "Decode", "Detections", "PredictDecode", "decode",
-           "decode_candidates", "decode_sidecar", "host_side", "postprocess", "predict_decode"]
+           "decode_candidates", "decode_sidecar", "host_side", "pack_boxes", "postprocess",
+           "predict_decode"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -164,6 +172,31 @@ def _nms_sorted_numpy(arr: npt.NDArray[np.float32], iou: float, max_det: int) ->
             union = areas[i] + areas[j] - inter
             suppressed[j] |= (lb[j] == lb[i]) & (inter > iou * union)
     return keep
+
+
+def pack_boxes(cls_maps: list[torch.Tensor], box_maps: list[torch.Tensor],
+               nc: int, reg_max: int, strides: tuple[int, ...], k: int,
+               multi_label: bool, host_out: torch.Tensor) -> None:
+    """Batch-1 device top-K + DFL box decode -> async copy of ``(k, 6)``
+    ``[x1, y1, x2, y2, logit, label]`` float32 candidates into pinned CPU
+    ``host_out``. Safe to capture inside a CUDA graph."""
+    cls_f = [m.float() for m in cls_maps]
+    box_f = [m.float() for m in box_maps]
+    points, stride = anchor_grid([tuple(c.shape[2:]) for c in cls_f], strides,
+                                 device=cls_f[0].device, dtype=torch.float32)
+    logits = torch.cat([m.reshape(nc, -1) for m in cls_f], 1)
+    n_anchors = logits.shape[1]
+    if multi_label:
+        top, idx = logits.reshape(-1).topk(k)
+        lab, anc = idx // n_anchors, idx % n_anchors
+    else:
+        best, labs = logits.max(0)
+        top, anc = best.topk(k)
+        lab = labs[anc]
+    dist = torch.cat([m.reshape(4 * reg_max, -1) for m in box_f], 1)[:, anc].t()
+    ltrb = dfl_expectation(dist, reg_max) * stride[anc]
+    xyxy = ltrb_to_xyxy(ltrb, points[anc])
+    host_out.copy_(torch.cat((xyxy, top[:, None], lab[:, None].float()), 1), non_blocking=True)
 
 
 def decode_candidates(packed: torch.Tensor, meta: Mapping[str, Any], d: Decode) -> Detections:

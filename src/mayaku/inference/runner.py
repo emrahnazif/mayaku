@@ -65,7 +65,8 @@ class Runner:
         the evaluator's RLE."""
         return self._run(images, conf, encode_mask, decode)
 
-    def _predict_one(self, image: ImageInput, d: Decode) -> Detections | None:
+    def _predict_one(self, image: ImageInput, d: Decode | None,
+                     decode_mode: str) -> Detections | Classification | None:
         """Optional single-image fast path bypassing full raw-map decode."""
         return None
 
@@ -82,12 +83,19 @@ class Runner:
             warnings.warn(f"predictions use conf {d.conf:g}, NMS IoU {d.iou:g}"
                           f"{', multi-label' if d.multi_label else ''}; decode=\"eval\" gives the "
                           "COCO-AP decode", stacklevel=3)
-        if len(images) == 1 and encode_mask is None and task != "classify":
-            dec = Decode.from_sidecar(self.sidecar["decode"]) if decode == "eval" else predict_decode(self.sidecar)
-            if conf is not None:
-                dec = dataclasses.replace(dec, conf=conf)
+        if len(images) == 1 and encode_mask is None:
+            dec: Decode | None
+            if task == "classify":
+                dec = None
+            else:
+                dec = (Decode.from_sidecar(self.sidecar["decode"]) if decode == "eval"
+                       else predict_decode(self.sidecar))
+                if conf is not None:
+                    dec = dataclasses.replace(dec, conf=conf)
             with torch.no_grad():
-                fast = self._predict_one(images[0], dec)
+                fast = self._predict_one(images[0], dec, decode)
+            if isinstance(fast, Classification):
+                return [fast]
             if fast is not None:
                 return [fast]
         x, metas = letterbox_batch(images, self.canvas, self._canvases(len(images)))

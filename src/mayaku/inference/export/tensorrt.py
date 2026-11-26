@@ -20,6 +20,11 @@ node, as TensorRT 10's fp16 flag does.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import re
+import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -27,18 +32,83 @@ from typing import Any
 import numpy as np
 import torch
 
+from mayaku.inference.decode import pack_boxes
 from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_header
 from mayaku.inference.export.onnx import onnx_graph
 from mayaku.inference.preprocess import Canvases, planar_tensor
 from mayaku.model import Detector
-from mayaku.model.box import anchor_grid, dfl_expectation, ltrb_to_xyxy
 from mayaku.utils.requirements import require
 
 PRECISIONS = ("fp16", "int8", "fp32")
 REGRID_INT8 = False   # no zero point: int8 keeps the trained symmetric grid (`mayaku.model.quant`)
+QUANT_SKIPS = True    # quantized skips let TensorRT fuse each add into its conv
 
 
 _WORKSPACE = 1 << 30
+# Level 2 cuts cold build time 2.5-4x on our 5-op graph (RTX 3060, v4-n 768:
+# fp16 71.8 -> 27.4s, int8 50.7 -> 13.6s) within <=0.07 ms E2E of level 3.
+_DEFAULT_OPT_LEVEL = 2
+
+
+def _opt_level() -> int:
+    raw = os.environ.get("MAYAKU_TRT_OPT_LEVEL")
+    if raw is None or not raw.strip():
+        return _DEFAULT_OPT_LEVEL
+    level = int(raw.strip())
+    if not 0 <= level <= 5:
+        raise ValueError(f"MAYAKU_TRT_OPT_LEVEL must be 0..5, got {level}")
+    return level
+
+
+def _timing_cache_enabled() -> bool:
+    return os.environ.get("MAYAKU_TRT_TIMING_CACHE", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _timing_cache_path(gpu_name: str, trt_version: str, opt_level: int) -> Path:
+    """Where TensorRT's timing cache lives on this host: keyed by GPU,
+    TensorRT major.minor and builder optimization level so repeat exports and
+    fine-tunes reuse layer timings (3-5x faster builds) without polluting cwd."""
+    override = os.environ.get("MAYAKU_CACHE_DIR")
+    root = Path(override).expanduser() if override else Path.home() / ".cache" / "mayaku"
+    gpu_slug = re.sub(r"[^a-z0-9]+", "_", gpu_name.lower()).strip("_") or "gpu"
+    trt_mm = ".".join(trt_version.split(".")[:2])
+    return root / f"trt_timing_{gpu_slug}_trt{trt_mm}_opt{opt_level}.bin"
+
+
+def _load_timing_cache(config: Any, cache_path: Path) -> bool:
+    """Attach the persistent timing cache (or an empty one on miss / corrupt
+    file) to `config`; returns whether an existing cache was loaded."""
+    raw = b""
+    if cache_path.is_file():
+        with contextlib.suppress(OSError):
+            raw = cache_path.read_bytes()
+    if raw:
+        try:
+            cache = config.create_timing_cache(raw)
+            config.set_timing_cache(cache, ignore_mismatch=False)
+            return True
+        except Exception:
+            pass
+    cache = config.create_timing_cache(b"")
+    config.set_timing_cache(cache, ignore_mismatch=False)
+    return False
+
+
+def _save_timing_cache(config: Any, cache_path: Path) -> None:
+    """Persist `config`'s timing cache atomically; silently ignored if the
+    cache directory is read-only."""
+    try:
+        cache = config.get_timing_cache()
+        if cache is None:
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_name(f"{cache_path.name}.tmp.{os.getpid()}")
+        tmp.write_bytes(bytes(cache.serialize()))
+        tmp.replace(cache_path)
+    except OSError:
+        pass
 
 
 def runnable() -> bool:
@@ -73,6 +143,13 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
             raise RuntimeError(f"TensorRT could not parse the ONNX graph:\n{errors}")
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, _WORKSPACE)
+    opt_level = _opt_level()
+    if hasattr(config, "builder_optimization_level"):
+        config.builder_optimization_level = opt_level
+    gpu_name = torch.cuda.get_device_name(0)
+    use_cache = _timing_cache_enabled() and hasattr(config, "create_timing_cache")
+    cache_path = _timing_cache_path(gpu_name, trt.__version__, opt_level) if use_cache else None
+    cache_hit = _load_timing_cache(config, cache_path) if cache_path is not None else False
     if not strongly_typed:
         if precision == "fp32":
             config.clear_flag(trt.BuilderFlag.TF32)   # fp32 means fp32
@@ -80,11 +157,21 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
             config.set_flag(trt.BuilderFlag.FP16)
             if int8:
                 config.set_flag(trt.BuilderFlag.INT8)
+    cache_note = ("cache hit" if cache_hit else "cache miss") if use_cache else "cache off"
+    print(f"[mayaku] building TensorRT {precision} engine for {gpu_name} "
+          f"({canvas[0]}x{canvas[1]}, opt={opt_level}, {cache_note})...",
+          file=sys.stderr, flush=True)
+    t0 = time.perf_counter()
     engine = builder.build_serialized_network(network, config)
     if engine is None:
         raise RuntimeError("TensorRT failed to build the engine; see its log above")
+    elapsed = time.perf_counter() - t0
+    if cache_path is not None:
+        _save_timing_cache(config, cache_path)
     path.write_bytes(bytes(engine))
     embed_sidecar(path, "tensorrt", dict(sidecar))
+    print(f"[mayaku] built TensorRT {precision} engine in {elapsed:.1f}s -> {path}",
+          file=sys.stderr, flush=True)
 
 
 def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
@@ -195,21 +282,7 @@ class Session:
         n_maps = 2 * len(strides)
         cls_maps = [self._out[n] for n in self.outputs[:n_maps:2]]
         box_maps = [self._out[n] for n in self.outputs[1:n_maps:2]]
-        points, stride = anchor_grid([tuple(c.shape[2:]) for c in cls_maps], strides,
-                                     device=self._device, dtype=torch.float32)
-        logits = torch.cat([m.reshape(nc, -1) for m in cls_maps], 1)
-        n_anchors = logits.shape[1]
-        if multi_label:
-            top, idx = logits.reshape(-1).topk(k)
-            lab, anc = idx // n_anchors, idx % n_anchors
-        else:
-            best, labs = logits.max(0)
-            top, anc = best.topk(k)
-            lab = labs[anc]
-        dist = torch.cat([m.reshape(4 * reg_max, -1) for m in box_maps], 1)[:, anc].t()
-        ltrb = dfl_expectation(dist, reg_max) * stride[anc]
-        xyxy = ltrb_to_xyxy(ltrb, points[anc])
-        host_out.copy_(torch.cat((xyxy, top[:, None], lab[:, None].float()), 1), non_blocking=True)
+        pack_boxes(cls_maps, box_maps, nc, reg_max, strides, k, multi_label, host_out)
 
     def _capture_boxes(self, nc: int, reg_max: int, strides: tuple[int, ...], topk: int,
                        multi_label: bool) -> tuple[torch.cuda.CUDAGraph, torch.Tensor]:

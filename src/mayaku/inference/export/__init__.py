@@ -10,6 +10,8 @@ contract on it; Core ML traces the same module.
 A target module provides `PRECISIONS` (the first is the default),
 `REGRID_INT8` (whether int8 gives one-sided ranges the whole grid, which
 needs a zero point; `mayaku.model.quant.ActFakeQuant.export_qparams`),
+`QUANT_SKIPS` (whether int8 quantizes the skip operand of residual adds;
+`mayaku.model.quant.qdq_export`),
 `write(model, path, canvas, precision, sidecar)`, `runnable()` (whether its
 runtime works on this host) and `Session(path, outputs, precision, device)`.
 
@@ -62,6 +64,11 @@ class Target:
     def regrid_int8(self) -> bool:
         """Whether its int8 gives one-sided ranges the whole grid."""
         return bool(self.module.REGRID_INT8)
+
+    @property
+    def quant_skips(self) -> bool:
+        """Whether its int8 quantizes the skip operand of residual adds."""
+        return bool(self.module.QUANT_SKIPS)
 
 
 TARGETS = {t: Target(s, importlib.import_module(f"mayaku.inference.export.{t}"))
@@ -168,7 +175,8 @@ def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 
     session = open_session(path, sidecar, _PARITY_DEVICE.get(target, "cpu"))
     px = torch.randint(0, 256, (1, *sidecar["canvas_hw"], 3), dtype=torch.uint8,
                        generator=torch.Generator().manual_seed(seed)).numpy()
-    with deploy_mode(model, sidecar["export"]["precision"] == "int8", TARGETS[target].regrid_int8):
+    t = TARGETS[target]
+    with deploy_mode(model, sidecar["export"]["precision"] == "int8", t.regrid_int8, t.quant_skips):
         ref = model.eval()(network_input(px, torch.device("cpu")))
     got = session(px)
     err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())
