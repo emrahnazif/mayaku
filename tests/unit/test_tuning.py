@@ -118,8 +118,20 @@ def test_health_report(tmp_path) -> None:
     ann = synthetic_coco(str(tmp_path), n=12)
     r = health_check(ann, tmp_path)
     assert r["images"] == 12 and r["classes"] == 4 and len(r["canvas"]) == 2
+    assert r["canvas"][0] % 64 == 0 and r["canvas"][1] % 64 == 0
     pinned = MayakuConfig.model_validate({"input": {"canvas_hw": [256, 384]}})
     assert health_check(ann, tmp_path, pinned)["canvas"] == [256, 384]
+    # A uniform 16:9 split under budget 800 separates align=64 (576x1024) from align=32 (608x1056).
+    wide_dir = tmp_path / "wide"
+    wide_ann = synthetic_coco(str(wide_dir), n=12)
+    import json
+
+    d = json.loads(open(wide_ann).read())
+    for im in d["images"]:
+        im["width"], im["height"] = 640, 360
+    open(wide_ann, "w").write(json.dumps(d))
+    rw = health_check(wide_ann, wide_dir, MayakuConfig.model_validate({"input": {"size_budget": 800}}))
+    assert rw["canvas"] == [576, 1024]
     assert abs(sum(r["object_size"].values()) - 1.0) < 0.02
     assert set(r["class_counts"]) <= {"c0", "c1", "c2", "c3"} and r["warnings"] == []
 

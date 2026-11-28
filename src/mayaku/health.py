@@ -45,7 +45,9 @@ def health_check(annotations: str | Path, images: str | Path,
     the one auto-config would pick), distributions, and factual ``warnings``."""
     cfg = cfg or MayakuConfig()
     coco = load_coco(str(images), str(annotations))
-    canvas = cfg.input.canvas_hw or canvas_for_data(coco.shapes, cfg.input.size_budget)
+    canvas = cfg.input.canvas_hw or canvas_for_data(
+        coco.shapes, cfg.input.size_budget, cfg.model.align
+    )
     stats = analyze_dataset(coco, canvas)
     return {
         "images": stats.num_images,

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `mayaku.health_check` now passes `cfg.model.align` (`64` on `v4` detectors) when deriving the
+  default canvas from dataset aspect ratios.
+
 - Core ML int8 exports now leave residual skip operands in float (`QUANT_SKIPS = False`, matching
   `main` commit `81f2549`), keeping every convolution W8A8 quantized while preventing the Apple
   Neural Engine compiler from falling back to the CPU at canvases of 800 px and above. On an Apple
